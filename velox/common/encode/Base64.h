@@ -23,37 +23,12 @@
 #include <folly/io/IOBuf.h>
 
 #include "velox/common/base/Exceptions.h"
+#include "velox/common/encode/EncoderUtils.h"
 
 namespace facebook::velox::encoding {
 
-const size_t kCharsetSize = 64;
-const size_t kReverseIndexSize = 256;
-
-/// Character set used for encoding purposes.
-/// Contains specific characters that form the encoding scheme.
-using Charset = std::array<char, kCharsetSize>;
-
-/// Reverse lookup table for decoding purposes.
-/// Maps each possible encoded character to its corresponding numeric value
-/// within the encoding base.
-using ReverseIndex = std::array<uint8_t, kReverseIndexSize>;
-
-/// Performs a reverse lookup in the reverse index to retrieve the original
-/// index of a character in the base.
-inline uint8_t
-baseReverseLookup(int base, char p, const ReverseIndex& reverseIndex) {
-  auto curr = reverseIndex[(uint8_t)p];
-  if (curr >= base) {
-    VELOX_USER_FAIL("decode() - invalid input string: invalid characters");
-  }
-  return curr;
-}
-
 class Base64 {
  public:
-  /// Padding character used in encoding.
-  const static char kPadding = '=';
-
   /// Returns encoded size for the input of the specified size.
   static size_t calculateEncodedSize(size_t size, bool withPadding = true);
 
@@ -121,64 +96,6 @@ class Base64 {
   /// encoding and writes the result to the 'dst'.
   static void
   decodeUrl(const char* src, size_t src_len, char* dst, size_t dst_len);
-
-  /// Checks if there is padding in encoded data.
-  static inline bool isPadded(const char* data, size_t len) {
-    return (len > 0 && data[len - 1] == kPadding) ? true : false;
-  }
-
-  /// Counts the number of padding characters in encoded data.
-  static inline size_t numPadding(const char* src, size_t len) {
-    size_t numPadding{0};
-    while (len > 0 && src[len - 1] == kPadding) {
-      numPadding++;
-      len--;
-    }
-    return numPadding;
-  }
-
-  // Validate the character in charset with ReverseIndex table
-  static constexpr bool checkForwardIndex(
-      uint8_t idx,
-      const Charset& charset,
-      const ReverseIndex& reverseIndex) {
-    for (uint8_t i = 0; i <= idx; ++i) {
-      if (!(reverseIndex[static_cast<uint8_t>(charset[i])] == i)) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  /// Searches for a character within a charset up to a certain index.
-  static const bool findCharacterInCharSet(
-      const Charset& charset,
-      int base,
-      uint8_t idx,
-      const char c);
-
-  /// Checks the consistency of a reverse index mapping for a given character
-  /// set.
-  static constexpr bool checkReverseIndex(
-      uint8_t idx,
-      const Charset& charset,
-      int base,
-      const ReverseIndex& reverseIndex) {
-    for (uint8_t currentIdx = idx; currentIdx != static_cast<uint8_t>(-1);
-         --currentIdx) {
-      if (reverseIndex[currentIdx] == 255) {
-        if (Base64::findCharacterInCharSet(
-                charset, base, 0, static_cast<char>(currentIdx))) {
-          return false;
-        }
-      } else {
-        if (!(charset[reverseIndex[currentIdx]] == currentIdx)) {
-          return false;
-        }
-      }
-    }
-    return true;
-  }
 
  private:
   /// Encodes the specified data using the provided charset.

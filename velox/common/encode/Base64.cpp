@@ -139,7 +139,7 @@ constexpr const ReverseIndex kBase64UrlReverseIndexTable = {
 // Verify that for every entry in kBase64Charset, the corresponding entry
 // in kBase64ReverseIndexTable is correct.
 static_assert(
-    Base64::checkForwardIndex(
+    checkForwardIndex(
         sizeof(kBase64Charset) - 1,
         kBase64Charset,
         kBase64ReverseIndexTable),
@@ -148,30 +148,16 @@ static_assert(
 // Verify that for every entry in kBase64UrlCharset, the corresponding entry
 // in kBase64UrlReverseIndexTable is correct.
 static_assert(
-    Base64::checkForwardIndex(
+    checkForwardIndex(
         sizeof(kBase64UrlCharset) - 1,
         kBase64UrlCharset,
         kBase64UrlReverseIndexTable),
     "kBase64UrlCharset has incorrect entries");
 
-// static
-const bool Base64::findCharacterInCharSet(
-    const Charset& charset,
-    int base,
-    uint8_t idx,
-    const char c) {
-  for (; idx < base; ++idx) {
-    if (charset[idx] == c) {
-      return true;
-    }
-  }
-  return false;
-}
-
 // Verify that for every entry in kBase64ReverseIndexTable, the corresponding
 // entry in kBase64Charset is correct.
 static_assert(
-    Base64::checkReverseIndex(
+    checkReverseIndex(
         sizeof(kBase64ReverseIndexTable) - 1,
         kBase64Charset,
         kBase,
@@ -181,7 +167,7 @@ static_assert(
 // Verify that for every entry in kBase64ReverseIndexTable, the corresponding
 // entry in kBase64Charset is correct.
 static_assert(
-    Base64::checkReverseIndex(
+    checkReverseIndex(
         sizeof(kBase64UrlReverseIndexTable) - 1,
         kBase64UrlCharset,
         kBase,
