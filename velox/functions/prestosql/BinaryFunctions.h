@@ -340,6 +340,22 @@ struct ToBase64UrlFunction {
   }
 };
 
+template <typename TExec>
+struct FromBase32Function {
+  VELOX_DEFINE_FUNCTION_TYPES(TExec);
+
+  // T can be either arg_type<Varchar> or arg_type<Varbinary>. These are the
+  // same, but hard-coding one of them might be confusing.
+  template <typename T>
+  FOLLY_ALWAYS_INLINE void call(out_type<Varbinary>& result, const T& input) {
+    auto inputSize = input.size();
+    result.resize(
+        encoding::Base32::calculateDecodedSize(input.data(), inputSize));
+    encoding::Base32::decode(
+        input.data(), inputSize, result.data(), result.size());
+  }
+};
+
 template <typename T>
 struct ToBase32Function {
   VELOX_DEFINE_FUNCTION_TYPES(T);
