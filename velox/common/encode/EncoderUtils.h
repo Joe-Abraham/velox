@@ -20,25 +20,25 @@
 #include <string>
 
 #include <folly/Range.h>
-
+#include "velox/common/base/Exceptions.h"
 namespace facebook::velox::encoding {
 
-class EncoderException : public std::exception {
- public:
-  explicit EncoderException(const char* msg) : msg_(msg) {}
-  const char* what() const noexcept override {
-    return msg_;
-  }
+constexpr size_t kCharsetSize = 64;
+constexpr size_t kReverseIndexSize = 256;
 
- protected:
-  const char* msg_;
-};
+// A character set used for encoding purposes. This array contains the specific
+// characters that form the encoding scheme, with each position representing a
+// distinct character according to the encoding base. For instance, in base64
+// encoding, this array will contain 64 different characters to represent all
+// possible base64 values.
+using Charset = std::array<char, kCharsetSize>;
 
-constexpr size_t CHARSET_SIZE = 64;
-constexpr size_t REVERSE_INDEX_SIZE = 256;
-
-using Charset = std::array<char, CHARSET_SIZE>;
-using ReverseIndex = std::array<uint8_t, REVERSE_INDEX_SIZE>;
+// A reverse lookup table for decoding purposes. It maps each possible encoded
+// character (represented as an unsigned 8-bit integer index) to its
+// corresponding numeric value within the encoding base. Characters that are not
+// part of the encoding set are mapped to 255, which indicates an invalid or
+// unrecognized character.
+using ReverseIndex = std::array<uint8_t, kReverseIndexSize>;
 
 /// Padding character used in encoding, placed at the end of the encoded string
 /// when padding is necessary.
@@ -50,7 +50,7 @@ inline bool isPadded(const char* data, size_t len) {
 }
 
 // Counts the number of padding characters in encoded data.
-inline size_t countPadding(const char* src, size_t len) {
+inline size_t numPadding(const char* src, size_t len) {
   size_t padding_count = 0;
   for (; len > 0 && src[len - 1] == kPadding; --len) {
     padding_count++;
@@ -58,14 +58,27 @@ inline size_t countPadding(const char* src, size_t len) {
   return padding_count;
 }
 
-// Gets value corresponding to an encoded character
-inline uint8_t
-baseReverseLookup(int base, char p, const ReverseIndex& reverse_lookup) {
-  auto curr = reverse_lookup[(uint8_t)p];
-  // Value of encoded character shall be less than base.
+/// Retrieves the decoded numeric value corresponding to an encoded character.
+///
+/// Parameters:
+/// - base: The numerical base used for decoding (e.g., base 64).
+/// - p: The encoded character to decode, provided as an integer or character.
+/// - index: A lookup table that maps encoded characters to their numeric
+/// values.
+///
+/// Returns:
+/// - The numeric value associated with the encoded character `p` according to
+/// the lookup table.
+///
+/// Throws:
+/// - VELOX_USER_FAIL: If the numeric value of the encoded character is greater
+/// than or equal to the specified base, indicating an invalid encoded
+/// character.
+inline uint8_t baseReverseLookup(int base, char p, const ReverseIndex& reverseIndex) {
+  auto curr = reverseIndex[(uint8_t)p];
+
   if (curr >= base) {
-    throw EncoderException(
-        "decode() - invalid input string: invalid characters");
+    VELOX_USER_FAIL("decode() - invalid input string: invalid characters");
   }
 
   return curr;
@@ -75,9 +88,9 @@ baseReverseLookup(int base, char p, const ReverseIndex& reverse_lookup) {
 constexpr bool checkForwardIndex(
     uint8_t idx,
     const Charset& charset,
-    const ReverseIndex& table) {
+    const ReverseIndex& reverseIndex) {
   for (uint8_t i = 0; i <= idx; ++i) {
-    if (!(table[static_cast<uint8_t>(charset[i])] == i)) {
+    if (!(reverseIndex[static_cast<uint8_t>(charset[i])] == i)) {
       return false;
     }
   }
@@ -107,15 +120,15 @@ constexpr bool checkReverseIndex(
     uint8_t idx,
     const Charset& charset,
     int base,
-    const ReverseIndex& table) {
+    const ReverseIndex& reverseIndex) {
   for (uint8_t currentIdx = idx;; --currentIdx) {
-    if (table[currentIdx] == 255) {
+    if (reverseIndex[currentIdx] == 255) {
       if (findCharacterInCharSet(
               charset, base, 0, static_cast<char>(currentIdx))) {
         return false; // Character should not be found
       }
     } else {
-      if (!(charset[table[currentIdx]] == currentIdx)) {
+      if (!(charset[reverseIndex[currentIdx]] == currentIdx)) {
         return false; // Character at table index does not match currentIdx
       }
     }

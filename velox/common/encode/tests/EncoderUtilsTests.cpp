@@ -21,15 +21,15 @@
 namespace facebook::velox::encoding {
 class EncoderUtilsTest : public ::testing::Test {};
 
-TEST_F(EncoderUtilsTest, ChecksPadding) {
+TEST_F(EncoderUtilsTest, isPadded) {
   EXPECT_TRUE(isPadded("ABC=", 4));
   EXPECT_FALSE(isPadded("ABC", 3));
 }
 
-TEST_F(EncoderUtilsTest, CountsPaddingCorrectly) {
-  EXPECT_EQ(0, countPadding("ABC", 3));
-  EXPECT_EQ(1, countPadding("ABC=", 4));
-  EXPECT_EQ(2, countPadding("AB==", 4));
+TEST_F(EncoderUtilsTest, numPadding) {
+  EXPECT_EQ(0, numPadding("ABC", 3));
+  EXPECT_EQ(1, numPadding("ABC=", 4));
+  EXPECT_EQ(2, numPadding("AB==", 4));
 }
 
 constexpr Charset testCharset = {
@@ -59,18 +59,17 @@ constexpr ReverseIndex testReverseIndex = {
     255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
     255};
 
-TEST_F(EncoderUtilsTest, HandlesLookupAndExceptions) {
+TEST_F(EncoderUtilsTest, baseReverseLookup) {
   int base = 64;
   EXPECT_NO_THROW(baseReverseLookup(base, 'A', testReverseIndex));
-  EXPECT_THROW(
-      baseReverseLookup(base, '=', testReverseIndex), EncoderException);
+  EXPECT_THROW(baseReverseLookup(base, '=', testReverseIndex), std::exception);
 }
 
-TEST_F(EncoderUtilsTest, ValidatesCharsetWithReverseIndex) {
+TEST_F(EncoderUtilsTest, checkForwardIndex) {
   EXPECT_TRUE(checkForwardIndex(63, testCharset, testReverseIndex));
 }
 
-TEST_F(EncoderUtilsTest, ValidatesReverseIndexWithCharset) {
+TEST_F(EncoderUtilsTest, checkReverseIndex) {
   EXPECT_TRUE(checkReverseIndex(255, testCharset, 64, testReverseIndex));
 }
 
