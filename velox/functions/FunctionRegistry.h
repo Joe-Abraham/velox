@@ -20,13 +20,13 @@
 
 #include "velox/expression/FunctionMetadata.h"
 #include "velox/expression/FunctionSignature.h"
+#include "velox/expression/VectorFunction.h"
 #include "velox/type/Type.h"
 
 namespace facebook::velox {
 
 using FunctionSignatureMap = std::
     unordered_map<std::string, std::vector<const exec::FunctionSignature*>>;
-
 /// Returns a mapping of all Simple and Vector functions registered in Velox
 /// The mapping is function name -> list of function signatures
 FunctionSignatureMap getFunctionSignatures();
