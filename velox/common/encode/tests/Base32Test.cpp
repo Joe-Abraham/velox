@@ -40,39 +40,35 @@ TEST_F(Base32Test, calculateEncodedSizeProperSize) {
 }
 
 TEST_F(Base32Test, calculateDecodedSizeProperSize) {
-  size_t encoded_size{0};
+  struct TestCase {
+    std::string encoded;
+    size_t initial_size;
+    int expected_decoded;
+    size_t expected_size;
+  };
 
-  encoded_size = 8;
-  EXPECT_EQ(1, Base32::calculateDecodedSize("ME======", encoded_size));
-  EXPECT_EQ(2, encoded_size);
+  std::vector<TestCase> test_cases = {
+      {"ME======", 8, 1, 2},
+      {"ME", 2, 1, 2},
+      {"MFRA====", 8, 2, 4},
+      {"MFRGG===", 8, 3, 5},
+      {"NBSWY3DPEB3W64TMMQ======", 24, 11, 18},
+      {"NBSWY3DPEB3W64TMMQ", 18, 11, 18}};
 
-  encoded_size = 2;
-  EXPECT_EQ(1, Base32::calculateDecodedSize("ME", encoded_size));
-  EXPECT_EQ(2, encoded_size);
+  for (const auto& test : test_cases) {
+    size_t encoded_size = test.initial_size;
+    EXPECT_EQ(
+        test.expected_decoded,
+        Base32::calculateDecodedSize(test.encoded.c_str(), encoded_size));
+    EXPECT_EQ(test.expected_size, encoded_size);
+  }
+}
 
-  encoded_size = 9;
+TEST_F(Base32Test, errorWhenDecodedStringPartiallyPadded) {
+  size_t encoded_size = 9;
   EXPECT_THROW(
       Base32::calculateDecodedSize("MFRA====", encoded_size),
       facebook::velox::encoding::EncoderException);
-
-  encoded_size = 8;
-  EXPECT_EQ(2, Base32::calculateDecodedSize("MFRA====", encoded_size));
-  EXPECT_EQ(4, encoded_size);
-
-  encoded_size = 8;
-  EXPECT_EQ(3, Base32::calculateDecodedSize("MFRGG===", encoded_size));
-  EXPECT_EQ(5, encoded_size);
-
-  encoded_size = 24;
-  EXPECT_EQ(
-      11,
-      Base32::calculateDecodedSize("NBSWY3DPEB3W64TMMQ======", encoded_size));
-  EXPECT_EQ(18, encoded_size);
-
-  encoded_size = 18;
-  EXPECT_EQ(
-      11, Base32::calculateDecodedSize("NBSWY3DPEB3W64TMMQ", encoded_size));
-  EXPECT_EQ(18, encoded_size);
 }
 
 } // namespace facebook::velox::encoding

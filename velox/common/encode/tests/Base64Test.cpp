@@ -45,22 +45,22 @@ TEST_F(Base64Test, fromBase64) {
   EXPECT_EQ("1234567890", Base64::decode(folly::StringPiece("MTIzNDU2Nzg5MA")));
 }
 
-struct TestCase {
-  std::string inputBase64;
-  size_t initialEncodedSize;
-  size_t expectedDecodedSize;
-  size_t expectedEncodedSizeAfter;
-};
-
-std::vector<TestCase> testCases{
-    {"SGVsbG8sIFdvcmxkIQ==", 20, 13, 18},
-    {"SGVsbG8sIFdvcmxkIQ", 18, 13, 18},
-    {"QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4=", 32, 23, 31},
-    {"QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4", 31, 23, 31},
-    {"MTIzNDU2Nzg5MA==", 16, 10, 14},
-    {"MTIzNDU2Nzg5MA", 14, 10, 14}};
-
 TEST_F(Base64Test, calculateDecodedSizeProperSize) {
+  struct TestCase {
+    std::string inputBase64;
+    size_t initialEncodedSize;
+    size_t expectedDecodedSize;
+    size_t expectedEncodedSizeAfter;
+  };
+
+  std::vector<TestCase> testCases{
+      {"SGVsbG8sIFdvcmxkIQ==", 20, 13, 18},
+      {"SGVsbG8sIFdvcmxkIQ", 18, 13, 18},
+      {"QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4=", 32, 23, 31},
+      {"QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4", 31, 23, 31},
+      {"MTIzNDU2Nzg5MA==", 16, 10, 14},
+      {"MTIzNDU2Nzg5MA", 14, 10, 14}};
+
   for (const auto& testCase : testCases) {
     size_t encodedSize = testCase.initialEncodedSize;
     size_t decodedSize =
