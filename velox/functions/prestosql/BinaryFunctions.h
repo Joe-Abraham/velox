@@ -295,7 +295,7 @@ struct FromBase64Function {
     try {
       std::string inputStr = std::string(input.data(), input.size());
 
-      if (inputStr.find('=') != std::string::npos) {
+      if (inputStr.find('=') == std::string::npos) {
         // Calculate the number of padding characters needed
         size_t padding = (4 - (inputStr.size() % 4)) % 4;
         inputStr.append(padding, '=');
@@ -323,7 +323,7 @@ struct FromBase64UrlFunction {
     try {
       std::string inputStr = std::string(input.data(), input.size());
 
-      if (inputStr.find('=') != std::string::npos) {
+      if (inputStr.find('=') == std::string::npos) {
         // Calculate the number of padding characters needed
         size_t padding = (4 - (inputStr.size() % 4)) % 4;
         inputStr.append(padding, '=');
@@ -380,7 +380,7 @@ struct FromBase32Function {
       const arg_type<Varchar>& input) {
     try {
       std::string inputStr = std::string(input.data(), input.size());
-      if (inputStr.find('=') != std::string::npos) {
+      if (inputStr.find('=') == std::string::npos) {
         // Calculate the number of padding characters needed
         size_t padding = (8 - (inputStr.size() % 8)) % 8;
         inputStr.append(padding, '=');

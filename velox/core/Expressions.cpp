@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 #include "velox/core/Expressions.h"
-#include "velox/common/encode/Base64.h"
+#include <cppcodec/base64_rfc4648.hpp>
 #include "velox/vector/VectorSaver.h"
 
 namespace facebook::velox::core {
@@ -84,8 +84,10 @@ folly::dynamic ConstantTypedExpr::serialize() const {
     std::ostringstream out;
     saveVector(*valueVector_, out);
     auto serializedValue = out.str();
-    obj["valueVector"] = encoding::Base64::encode(
-        serializedValue.data(), serializedValue.size());
+    auto encodedValue = cppcodec::base64_rfc4648::encode<std::string>(
+        reinterpret_cast<const uint8_t*>(serializedValue.data()),
+        serializedValue.size());
+    obj["valueVector"] = encodedValue;
   } else {
     obj["value"] = value_.serialize();
   }
@@ -105,8 +107,10 @@ TypedExprPtr ConstantTypedExpr::create(
   }
 
   auto encodedData = obj["valueVector"].asString();
-  auto serializedData = encoding::Base64::decode(encodedData);
-  std::istringstream dataStream(serializedData);
+  auto serializedData =
+      cppcodec::base64_rfc4648::decode<std::vector<uint8_t>>(encodedData);
+  std::string decodedString(serializedData.begin(), serializedData.end());
+  std::istringstream dataStream(decodedString);
 
   auto* pool = static_cast<memory::MemoryPool*>(context);
 

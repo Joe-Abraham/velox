@@ -23,11 +23,10 @@
 #define XXH_INLINE_ALL
 #include <xxhash.h>
 
-#include "velox/common/encode/Base64.h"
+#include <cppcodec/base64_rfc4648.hpp>
 
 using namespace facebook::velox;
 using namespace facebook::velox::common::hll;
-using namespace facebook::velox::encoding;
 
 template <typename T>
 uint64_t hashOne(T value) {
@@ -180,10 +179,12 @@ TEST_P(DenseHllTest, canDeserialize) {
       "AwkLD8BYTA9BXyg="};
 
   for (folly::StringPiece& invalidString : invalidStrings) {
-    auto invalidHll = Base64::decode(invalidString);
-    EXPECT_TRUE(DenseHll::canDeserialize(invalidHll.c_str()));
-    EXPECT_FALSE(
-        DenseHll::canDeserialize(invalidHll.c_str(), invalidHll.length()));
+    auto invalidHll = cppcodec::base64_rfc4648::decode<std::vector<uint8_t>>(
+        std::string(invalidString.data(), invalidString.size()));
+    EXPECT_TRUE(DenseHll::canDeserialize(
+        reinterpret_cast<const char*>(invalidHll.data())));
+    EXPECT_FALSE(DenseHll::canDeserialize(
+        reinterpret_cast<const char*>(invalidHll.data()), invalidHll.size()));
   }
 
   std::vector<folly::StringPiece> validStrings{
@@ -191,9 +192,12 @@ TEST_P(DenseHllTest, canDeserialize) {
   };
 
   for (folly::StringPiece& validString : validStrings) {
-    auto validHll = Base64::decode(validString);
-    EXPECT_TRUE(DenseHll::canDeserialize(validHll.c_str()));
-    EXPECT_TRUE(DenseHll::canDeserialize(validHll.c_str(), validHll.length()));
+    auto validHll = cppcodec::base64_rfc4648::decode<std::vector<uint8_t>>(
+        std::string(validString.data(), validString.size()));
+    EXPECT_TRUE(DenseHll::canDeserialize(
+        reinterpret_cast<const char*>(validHll.data())));
+    EXPECT_TRUE(DenseHll::canDeserialize(
+        reinterpret_cast<const char*>(validHll.data()), validHll.size()));
   }
 }
 
