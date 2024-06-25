@@ -15,9 +15,9 @@
  */
 
 #include "velox/type/Variant.h"
+#include <cppcodec/base64_rfc4648.hpp>
 #include <cfloat>
 #include "folly/json.h"
-#include "velox/common/encode/Base64.h"
 #include "velox/type/DecimalUtil.h"
 #include "velox/type/FloatingPointUtil.h"
 #include "velox/type/HugeInt.h"
@@ -263,7 +263,8 @@ std::string variant::toJson(const TypePtr& type) const {
     }
     case TypeKind::VARBINARY: {
       auto& str = value<TypeKind::VARBINARY>();
-      auto encoded = encoding::Base64::encode(str);
+      auto encoded = cppcodec::base64_rfc4648::encode<std::string>(
+          reinterpret_cast<const uint8_t*>(str.data()), str.size());
       return '"' + encoded + '"';
     }
     case TypeKind::VARCHAR: {
@@ -390,9 +391,11 @@ std::string variant::toJsonUnsafe(const TypePtr& type) const {
     }
     case TypeKind::VARBINARY: {
       auto& str = value<TypeKind::VARBINARY>();
-      auto encoded = encoding::Base64::encode(str);
+      auto encoded = cppcodec::base64_rfc4648::encode<std::string>(
+          reinterpret_cast<const uint8_t*>(str.data()), str.size());
       return '"' + encoded + '"';
     }
+
     case TypeKind::VARCHAR: {
       auto& str = value<TypeKind::VARCHAR>();
       std::string target;
@@ -509,10 +512,10 @@ folly::dynamic variant::serialize() const {
     }
     case TypeKind::VARBINARY: {
       auto& str = value<TypeKind::VARBINARY>();
-      objValue = encoding::Base64::encode(str);
+      objValue = cppcodec::base64_rfc4648::encode<std::string>(
+          reinterpret_cast<const uint8_t*>(str.data()), str.size());
       break;
     }
-
     case TypeKind::TINYINT: {
       objValue = value<TypeKind::TINYINT>();
       break;
@@ -618,12 +621,14 @@ variant variant::create(const folly::dynamic& variantobj) {
       return kind == TypeKind::ARRAY ? variant::array(values)
                                      : variant::row(values);
     }
-
     case TypeKind::VARBINARY: {
       auto str = obj.asString();
-      auto result = encoding::Base64::decode(str);
+      auto decodedVector =
+          cppcodec::base64_rfc4648::decode<std::vector<uint8_t>>(str);
+      std::string result(decodedVector.begin(), decodedVector.end());
       return variant::binary(std::move(result));
     }
+
     case TypeKind::VARCHAR:
       return variant::create<TypeKind::VARCHAR>(obj.asString());
     case TypeKind::TINYINT:

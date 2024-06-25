@@ -37,5 +37,4 @@ target_link_libraries(
          velox_vector
          Boost::headers
          Folly::folly
-         fmt::fmt
-  PRIVATE velox_encode)
+         fmt::fmt)

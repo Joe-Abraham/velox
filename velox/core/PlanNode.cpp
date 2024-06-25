@@ -15,7 +15,7 @@
  */
 #include <folly/container/F14Set.h>
 
-#include "velox/common/encode/Base64.h"
+#include <cppcodec/base64_rfc4648.hpp>
 #include "velox/core/PlanNode.h"
 #include "velox/vector/VectorSaver.h"
 
@@ -680,9 +680,11 @@ folly::dynamic ValuesNode::serialize() const {
   }
 
   auto serializedData = out.str();
+  auto encodedData = cppcodec::base64_rfc4648::encode<std::string>(
+      reinterpret_cast<const uint8_t*>(serializedData.data()),
+      serializedData.size());
 
-  obj["data"] =
-      encoding::Base64::encode(serializedData.data(), serializedData.size());
+  obj["data"] = encodedData;
   obj["parallelizable"] = parallelizable_;
   obj["repeatTimes"] = repeatTimes_;
   return obj;
@@ -694,13 +696,15 @@ PlanNodePtr ValuesNode::create(const folly::dynamic& obj, void* context) {
   VELOX_CHECK_EQ(0, sources.size());
 
   auto encodedData = obj["data"].asString();
-  auto serializedData = encoding::Base64::decode(encodedData);
-  std::istringstream dataStream(serializedData);
+  auto serializedData =
+      cppcodec::base64_rfc4648::decode<std::vector<uint8_t>>(encodedData);
+  std::string decodedString(serializedData.begin(), serializedData.end());
+  std::istringstream dataStream(decodedString);
 
   auto* pool = static_cast<memory::MemoryPool*>(context);
 
   std::vector<RowVectorPtr> values;
-  while (dataStream.tellg() < serializedData.size()) {
+  while (dataStream.tellg() < decodedString.size()) {
     values.push_back(
         std::dynamic_pointer_cast<RowVector>(restoreVector(dataStream, pool)));
   }

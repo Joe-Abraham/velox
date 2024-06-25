@@ -18,7 +18,6 @@ target_link_libraries(
             velox_dwio_catalog_fbhive
             velox_dwio_common
             velox_dwio_common_exception
-            velox_encode
             velox_exception
             velox_memory
             velox_process

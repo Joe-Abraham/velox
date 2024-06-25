@@ -15,11 +15,11 @@
  */
 
 #include "velox/exec/fuzzer/PrestoQueryRunner.h"
+#include <cppcodec/base64_rfc4648.hpp>
 #include <cpr/cpr.h> // @manual
 #include <folly/json.h>
 #include <iostream>
 #include "velox/common/base/Fs.h"
-#include "velox/common/encode/Base64.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/connectors/hive/HiveDataSink.h"
 #include "velox/connectors/hive/TableHandle.h"
@@ -149,8 +149,10 @@ class ServerResponse {
 
     std::vector<RowVectorPtr> vectors;
     for (auto& encodedData : response_["binaryData"]) {
-      const std::string data =
-          encoding::Base64::decode(encodedData.stringPiece());
+      auto decodedVector =
+          cppcodec::base64_rfc4648::decode<std::vector<uint8_t>>(
+              encodedData.asString());
+      std::string data(decodedVector.begin(), decodedVector.end());
       vectors.push_back(deserialize(rowType, data, pool));
     }
     return vectors;
