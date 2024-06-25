@@ -46,44 +46,35 @@ TEST_F(Base64Test, fromBase64) {
 }
 
 TEST_F(Base64Test, calculateDecodedSizeProperSize) {
-  size_t encoded_size{0};
+  struct TestCase {
+    std::string inputBase64;
+    size_t initialEncodedSize;
+    size_t expectedDecodedSize;
+    size_t expectedEncodedSizeAfter;
+  };
 
-  encoded_size = 20;
-  EXPECT_EQ(
-      13, Base64::calculateDecodedSize("SGVsbG8sIFdvcmxkIQ==", encoded_size));
-  EXPECT_EQ(18, encoded_size);
+  std::vector<TestCase> testCases{
+      {"SGVsbG8sIFdvcmxkIQ==", 20, 13, 18},
+      {"SGVsbG8sIFdvcmxkIQ", 18, 13, 18},
+      {"QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4=", 32, 23, 31},
+      {"QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4", 31, 23, 31},
+      {"MTIzNDU2Nzg5MA==", 16, 10, 14},
+      {"MTIzNDU2Nzg5MA", 14, 10, 14}};
 
-  encoded_size = 18;
-  EXPECT_EQ(
-      13, Base64::calculateDecodedSize("SGVsbG8sIFdvcmxkIQ", encoded_size));
-  EXPECT_EQ(18, encoded_size);
+  for (const auto& testCase : testCases) {
+    size_t encodedSize = testCase.initialEncodedSize;
+    size_t decodedSize =
+        Base64::calculateDecodedSize(testCase.inputBase64.c_str(), encodedSize);
+    EXPECT_EQ(testCase.expectedDecodedSize, decodedSize);
+    EXPECT_EQ(testCase.expectedEncodedSizeAfter, encodedSize);
+  }
+}
 
-  encoded_size = 21;
+TEST_F(Base64Test, errorWhenDecodedStringPartiallyPadded) {
+  size_t encoded_size = 21;
   EXPECT_THROW(
       Base64::calculateDecodedSize("SGVsbG8sIFdvcmxkIQ==", encoded_size),
-      facebook::velox::encoding::Base64Exception);
-
-  encoded_size = 32;
-  EXPECT_EQ(
-      23,
-      Base64::calculateDecodedSize(
-          "QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4=", encoded_size));
-  EXPECT_EQ(31, encoded_size);
-
-  encoded_size = 31;
-  EXPECT_EQ(
-      23,
-      Base64::calculateDecodedSize(
-          "QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4", encoded_size));
-  EXPECT_EQ(31, encoded_size);
-
-  encoded_size = 16;
-  EXPECT_EQ(10, Base64::calculateDecodedSize("MTIzNDU2Nzg5MA==", encoded_size));
-  EXPECT_EQ(14, encoded_size);
-
-  encoded_size = 14;
-  EXPECT_EQ(10, Base64::calculateDecodedSize("MTIzNDU2Nzg5MA", encoded_size));
-  EXPECT_EQ(14, encoded_size);
+      facebook::velox::encoding::EncoderException);
 }
 
 } // namespace facebook::velox::encoding
