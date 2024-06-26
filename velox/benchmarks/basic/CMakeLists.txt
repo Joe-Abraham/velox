@@ -13,6 +13,7 @@
 # limitations under the License.
 set(velox_benchmark_deps
     velox_type
+    velox_encode
     velox_vector
     velox_vector_fuzzer
     velox_expression
@@ -84,3 +85,7 @@ add_executable(velox_format_datetime_benchmark FormatDateTimeBenchmark.cpp)
 target_link_libraries(
   velox_format_datetime_benchmark ${velox_benchmark_deps} velox_vector_test_lib
   velox_functions_spark velox_functions_prestosql)
+
+add_executable(velox_benchmark_basic_encoding EncodingBenchmark.cpp)
+target_link_libraries(velox_benchmark_basic_encoding ${velox_benchmark_deps}
+                      velox_functions_prestosql)

@@ -16,5 +16,7 @@ if(${VELOX_BUILD_TESTING})
   add_subdirectory(tests)
 endif()
 
+include_directories(${FOLLY_INCLUDE_DIRS})
+
 add_library(velox_encode Base64.cpp)
 target_link_libraries(velox_encode PUBLIC Folly::folly)

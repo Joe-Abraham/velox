@@ -278,8 +278,9 @@ struct ToBase64Function {
   FOLLY_ALWAYS_INLINE void call(
       out_type<Varchar>& result,
       const arg_type<Varbinary>& input) {
-    result.resize(encoding::Base64::calculateEncodedSize(input.size()));
-    encoding::Base64::encode(input.data(), input.size(), result.data());
+    auto encoded = encoding::Base64::encode(input.data(), input.size());
+    result.resize(encoded.size());
+    std::memcpy(result.data(), encoded.data(), encoded.size());
   }
 };
 
@@ -290,11 +291,19 @@ struct FromBase64Function {
       out_type<Varbinary>& result,
       const arg_type<Varchar>& input) {
     try {
-      auto inputSize = input.size();
-      result.resize(
-          encoding::Base64::calculateDecodedSize(input.data(), inputSize));
-      encoding::Base64::decode(
-          input.data(), inputSize, result.data(), result.size());
+      std::string inputCopy(input.data(), input.size());
+
+      if (inputCopy.find('=') == std::string::npos) {
+        // Calculate the number of padding characters needed
+        size_t padding = (4 - (inputCopy.size() % 4)) % 4;
+        inputCopy.append(padding, '=');
+      }
+      auto decoded_size = encoding::Base64::calculateDecodedSize(
+          inputCopy.data(), inputCopy.size());
+      result.resize(decoded_size);
+      std::string decoded;
+      encoding::Base64::decode(inputCopy.data(), inputCopy.size(), decoded);
+      std::memcpy(result.data(), decoded.data(), decoded.size());
     } catch (const encoding::Base64Exception& e) {
       VELOX_USER_FAIL(e.what());
     }
@@ -307,11 +316,25 @@ struct FromBase64UrlFunction {
   FOLLY_ALWAYS_INLINE void call(
       out_type<Varbinary>& result,
       const arg_type<Varchar>& input) {
-    auto inputSize = input.size();
-    result.resize(
-        encoding::Base64::calculateDecodedSize(input.data(), inputSize));
-    encoding::Base64::decodeUrl(
-        input.data(), inputSize, result.data(), result.size());
+    try {
+      folly::StringPiece inputPiece(input);
+      std::string inputCopy(inputPiece.data(), inputPiece.size());
+
+      if (inputPiece.find('=') == std::string::npos) {
+        // Calculate the number of padding characters needed
+        size_t padding = (4 - (inputPiece.size() % 4)) % 4;
+        inputCopy.append(padding, '=');
+      }
+
+      auto decoded_size = encoding::Base64::calculateDecodedSize(
+          inputCopy.data(), inputCopy.size(), true);
+      result.resize(decoded_size);
+      std::string decoded;
+      encoding::Base64::decodeUrl(inputCopy.data(), inputCopy.size(), decoded);
+      std::memcpy(result.data(), decoded.data(), decoded.size());
+    } catch (const encoding::Base64Exception& e) {
+      VELOX_USER_FAIL(e.what());
+    }
   }
 };
 
@@ -322,8 +345,9 @@ struct ToBase64UrlFunction {
   FOLLY_ALWAYS_INLINE void call(
       out_type<Varchar>& result,
       const arg_type<Varbinary>& input) {
-    result.resize(encoding::Base64::calculateEncodedSize(input.size()));
-    encoding::Base64::encodeUrl(input.data(), input.size(), result.data());
+    auto encoded = encoding::Base64::encodeUrl(input.data(), input.size());
+    result.resize(encoded.size());
+    std::memcpy(result.data(), encoded.data(), encoded.size());
   }
 };
 
