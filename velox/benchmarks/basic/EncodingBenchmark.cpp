@@ -85,13 +85,6 @@ BENCHMARK(toBase64Decode) {
   benchmark->run("from_base64(to_base64(input))");
 }
 
-BENCHMARK(toBase64EncodeCppCodec) {
-  benchmark->run("to_base64cppcodec(input)");
-}
-BENCHMARK(toBase64DecodeCppCodec) {
-  benchmark->run("from_base64cppcodec(to_base64cppcodec(input))");
-}
-
 BENCHMARK(toBase32EncodeCppCodec) {
   benchmark->run("to_base32(input)");
 }
