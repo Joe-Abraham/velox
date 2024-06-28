@@ -74,8 +74,7 @@ namespace {
 const SignatureMap* getSignatureMap(
     const std::string& name,
     const FunctionMap& registeredFunctions) {
-  const auto sanitizedName = sanitizeName(name);
-  const auto it = registeredFunctions.find(sanitizedName);
+  const auto it = registeredFunctions.find(name);
   return it != registeredFunctions.end() ? &it->second : nullptr;
 }
 } // namespace
@@ -83,8 +82,9 @@ const SignatureMap* getSignatureMap(
 std::vector<const FunctionSignature*>
 SimpleFunctionRegistry::getFunctionSignatures(const std::string& name) const {
   std::vector<const FunctionSignature*> signatures;
+  const auto sanitizedName = sanitizeName(name);
   registeredFunctions_.withRLock([&](const auto& map) {
-    if (const auto* signatureMap = getSignatureMap(name, map)) {
+    if (const auto* signatureMap = getSignatureMap(sanitizedName, map)) {
       signatures.reserve(signatureMap->size());
       for (const auto& pair : *signatureMap) {
         signatures.emplace_back(&pair.first);

@@ -968,6 +968,8 @@ class SimpleFunctionAdapterFactoryImpl : public SimpleFunctionAdapterFactory {
  public:
   // Exposed for use in FunctionRegistry
   using Metadata = typename UDFHolder::Metadata;
+  static constexpr bool isDefaultNullBehavior =
+      UDFHolder::is_default_null_behavior;
 
   explicit SimpleFunctionAdapterFactoryImpl() {}
 

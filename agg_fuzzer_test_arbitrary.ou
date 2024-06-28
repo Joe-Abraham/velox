@@ -1,0 +1,2 @@
+I20240603 14:16:40.062871 441101 AggregationFuzzerBase.cpp:761] Using DuckDB as the reference DB.
+E20240603 14:16:40.063867 441101 AggregationFuzzerRunner.h:100] No aggregate functions left after filtering using 'only' and 'skip' lists.

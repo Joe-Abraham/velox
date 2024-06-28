@@ -34,16 +34,17 @@ const std::shared_ptr<const T>& singletonUdfMetadata(
 
 using Function = SimpleFunctionAdapterFactory;
 using Metadata = core::ISimpleFunctionMetadata;
+using FunctionMetadata = VectorFunctionMetadata;
 using FunctionFactory = std::function<std::unique_ptr<Function>()>;
 
 struct FunctionEntry {
   FunctionEntry(
-      const std::shared_ptr<const Metadata>& metadata,
+      const std::shared_ptr<const FunctionMetadata>& functionMetadata,
       const FunctionFactory& factory)
-      : metadata_{metadata}, factory_{factory} {}
+      : functionMetadata_{functionMetadata}, factory_{factory} {}
 
-  const Metadata& getMetadata() const {
-    return *metadata_;
+  const FunctionMetadata& getFunctionMetadata() const {
+    return *functionMetadata_;
   }
 
   std::unique_ptr<Function> createFunction() const {
@@ -51,7 +52,7 @@ struct FunctionEntry {
   }
 
  private:
-  const std::shared_ptr<const Metadata> metadata_;
+  const std::shared_ptr<const FunctionMetadata> functionMetadata_;
   const FunctionFactory factory_;
 };
 

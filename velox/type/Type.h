@@ -1756,6 +1756,14 @@ struct SimpleTypeTrait<int16_t> : public TypeTraits<TypeKind::SMALLINT> {};
 template <>
 struct SimpleTypeTrait<int8_t> : public TypeTraits<TypeKind::TINYINT> {};
 
+template <typename P, typename S>
+struct SimpleTypeTrait<ShortDecimal<P, S>>
+    : public TypeTraits<TypeKind::BIGINT> {};
+
+template <typename P, typename S>
+struct SimpleTypeTrait<LongDecimal<P, S>>
+    : public TypeTraits<TypeKind::HUGEINT> {};
+
 template <>
 struct SimpleTypeTrait<float> : public TypeTraits<TypeKind::REAL> {};
 
