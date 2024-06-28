@@ -22,27 +22,37 @@
 #include <folly/Range.h>
 #include <folly/io/IOBuf.h>
 
+#include "velox/common/base/Exceptions.h"
+
 namespace facebook::velox::encoding {
 
-class Base64Exception : public std::exception {
- public:
-  explicit Base64Exception(const char* msg) : msg_(msg) {}
-  const char* what() const noexcept override {
-    return msg_;
-  }
+const size_t kCharsetSize = 64;
+const size_t kReverseIndexSize = 256;
 
- protected:
-  const char* msg_;
-};
+/// Character set used for encoding purposes.
+/// Contains specific characters that form the encoding scheme.
+using Charset = std::array<char, kCharsetSize>;
+
+/// Reverse lookup table for decoding purposes.
+/// Maps each possible encoded character to its corresponding numeric value
+/// within the encoding base.
+using ReverseIndex = std::array<uint8_t, kReverseIndexSize>;
+
+/// Performs a reverse lookup in the reverse index to retrieve the original
+/// index of a character in the base.
+inline uint8_t
+baseReverseLookup(int base, char p, const ReverseIndex& reverseIndex) {
+  auto curr = reverseIndex[(uint8_t)p];
+  if (curr >= base) {
+    VELOX_USER_FAIL("decode() - invalid input string: invalid characters");
+  }
+  return curr;
+}
 
 class Base64 {
  public:
-  using Charset = std::array<char, 64>;
-  using ReverseIndex = std::array<uint8_t, 256>;
-
-  static std::string encode(const char* data, size_t len);
-  static std::string encode(folly::StringPiece text);
-  static std::string encode(const folly::IOBuf* text);
+  /// Padding character used in encoding.
+  const static char kPadding = '=';
 
   /// Returns encoded size for the input of the specified size.
   static size_t calculateEncodedSize(size_t size, bool withPadding = true);
@@ -52,10 +62,14 @@ class Base64 {
   /// returned by the calculateEncodedSize().
   static void encode(const char* data, size_t size, char* output);
 
-  // Appends the encoded text to out.
-  static void encodeAppend(folly::StringPiece text, std::string& out);
+  /// Encodes the specified number of characters from the 'data'.
+  static std::string encode(const char* data, size_t len);
 
-  static std::string decode(folly::StringPiece encoded);
+  /// Encodes the specified text.
+  static std::string encode(folly::StringPiece text);
+
+  /// Encodes the specified IOBuf data.
+  static std::string encode(const folly::IOBuf* text);
 
   /// Returns the actual size of the decoded data. Will also remove the padding
   /// length from the input data 'size'.
@@ -66,54 +80,114 @@ class Base64 {
   /// returned by the calculateDecodedSize().
   static void decode(const char* data, size_t size, char* output);
 
+  /// Decodes the specified payload and writes the result to the 'output'.
   static void decode(
       const std::pair<const char*, int32_t>& payload,
       std::string& output);
 
-  /// Encodes the specified number of characters from the 'data' and writes the
-  /// result to the 'output'. The output must have enough space, e.g. as
-  /// returned by the calculateEncodedSize().
-  static void encodeUrl(const char* data, size_t size, char* output);
+  /// Decodes the specified encoded text.
+  static std::string decode(folly::StringPiece encoded);
 
-  // compatible with www's Base64URL::encode/decode
-  // TODO rename encode_url/decode_url to encodeUrl/encodeUrl.
-  static std::string encodeUrl(const char* data, size_t len);
-  static std::string encodeUrl(const folly::IOBuf* data);
-  static std::string encodeUrl(folly::StringPiece text);
-  static void decodeUrl(
-      const std::pair<const char*, int32_t>& payload,
-      std::string& output);
-  static std::string decodeUrl(folly::StringPiece text);
-
+  /// Decodes the specified number of characters from the 'src' and writes the
+  /// result to the 'dst'.
   static size_t
   decode(const char* src, size_t src_len, char* dst, size_t dst_len);
 
+  /// Encodes the specified number of characters from the 'data' and writes the
+  /// result to the 'output' using URL encoding. The output must have enough
+  /// space, e.g. as returned by the calculateEncodedSize().
+  static void encodeUrl(const char* data, size_t size, char* output);
+
+  /// Encodes the specified number of characters from the 'data' using URL
+  /// encoding.
+  static std::string encodeUrl(const char* data, size_t len);
+
+  /// Encodes the specified IOBuf data using URL encoding.
+  static std::string encodeUrl(const folly::IOBuf* data);
+
+  /// Encodes the specified text using URL encoding.
+  static std::string encodeUrl(folly::StringPiece text);
+
+  /// Decodes the specified URL encoded payload and writes the result to the
+  /// 'output'.
+  static void decodeUrl(
+      const std::pair<const char*, int32_t>& payload,
+      std::string& output);
+
+  /// Decodes the specified URL encoded text.
+  static std::string decodeUrl(folly::StringPiece text);
+
+  /// Decodes the specified number of characters from the 'src' using URL
+  /// encoding and writes the result to the 'dst'.
   static void
   decodeUrl(const char* src, size_t src_len, char* dst, size_t dst_len);
 
-  constexpr static char kBase64Pad = '=';
-
- private:
+  /// Checks if there is padding in encoded data.
   static inline bool isPadded(const char* data, size_t len) {
-    return (len > 0 && data[len - 1] == kBase64Pad);
+    return (len > 0 && data[len - 1] == kPadding) ? true : false;
   }
 
-  static inline size_t countPadding(const char* src, size_t len) {
+  /// Counts the number of padding characters in encoded data.
+  static inline size_t numPadding(const char* src, size_t len) {
     size_t numPadding{0};
-    while (len > 0 && src[len - 1] == kBase64Pad) {
+    while (len > 0 && src[len - 1] == kPadding) {
       numPadding++;
       len--;
     }
-
     return numPadding;
   }
 
-  static uint8_t Base64ReverseLookup(char p, const ReverseIndex& table);
+  // Validate the character in charset with ReverseIndex table
+  static constexpr bool checkForwardIndex(
+      uint8_t idx,
+      const Charset& charset,
+      const ReverseIndex& reverseIndex) {
+  for (uint8_t i = 0; i <= idx; ++i) {
+    if (!(reverseIndex[static_cast<uint8_t>(charset[i])] == i)) {
+      return false;
+    }
+  }
+  return true;
+}
 
+  /// Searches for a character within a charset up to a certain index.
+  static const bool findCharacterInCharSet(
+      const Charset& charset,
+      int base,
+      uint8_t idx,
+      const char c);
+
+  /// Checks the consistency of a reverse index mapping for a given character
+  /// set.
+  static constexpr bool checkReverseIndex(
+      uint8_t idx,
+      const Charset& charset,
+      int base,
+      const ReverseIndex& reverseIndex)
+      {
+          for (uint8_t currentIdx = idx; currentIdx != static_cast<uint8_t>(-1);
+       --currentIdx) {
+    if (reverseIndex[currentIdx] == 255) {
+      if (Base64::findCharacterInCharSet(
+              charset, base, 0, static_cast<char>(currentIdx))) {
+        return false;
+      }
+    } else {
+      if (!(charset[reverseIndex[currentIdx]] == currentIdx)) {
+        return false;
+      }
+    }
+  }
+  return true;
+      }
+
+ private:
+  /// Encodes the specified data using the provided charset.
   template <class T>
   static std::string
   encodeImpl(const T& data, const Charset& charset, bool include_pad);
 
+  /// Encodes the specified data using the provided charset.
   template <class T>
   static void encodeImpl(
       const T& data,
@@ -121,6 +195,7 @@ class Base64 {
       bool include_pad,
       char* out);
 
+  /// Decodes the specified data using the provided reverse lookup table.
   static size_t decodeImpl(
       const char* src,
       size_t src_len,
