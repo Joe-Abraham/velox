@@ -75,17 +75,6 @@ TEST_F(Base64Test, calculateDecodedSizeImproperSize) {
           "SGVsbG8sIFdvcmxkIQ===", encodedSize, decodedSize));
 }
 
-TEST_F(Base64Test, isPadded) {
-  EXPECT_TRUE(Base64::isPadded("ABC=", 4));
-  EXPECT_FALSE(Base64::isPadded("ABC", 3));
-}
-
-TEST_F(Base64Test, numPadding) {
-  EXPECT_EQ(0, Base64::numPadding("ABC", 3));
-  EXPECT_EQ(1, Base64::numPadding("ABC=", 4));
-  EXPECT_EQ(2, Base64::numPadding("AB==", 4));
-}
-
 TEST_F(Base64Test, testDecodeImpl) {
   constexpr const Base64::ReverseIndex reverseTable = {
       255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
@@ -127,8 +116,7 @@ TEST_F(Base64Test, testDecodeImpl) {
       "SGVsbG8gd29ybGQ$",
       output1,
       sizeof(output1),
-      Status::UserError(
-          "Base64::decode() - invalid input string: contains invalid characters."));
+      Status::UserError("invalid input string: contains invalid characters."));
 
   // All characters are padding characters
   testDecode("====", output1, sizeof(output1), Status::OK());
@@ -162,8 +150,7 @@ TEST_F(Base64Test, testDecodeImpl) {
       " SGVsb G8gd2 9ybGQ= ",
       output1,
       sizeof(output1),
-      Status::UserError(
-          "Base64::decode() - invalid input string: contains invalid characters."));
+      Status::UserError("invalid input string: contains invalid characters."));
 
   // insufficient buffer size
   testDecode(
