@@ -17,13 +17,26 @@
 #include "velox/common/encode/Base64.h"
 
 #include <gtest/gtest.h>
-#include "velox/common/base/Exceptions.h"
 #include "velox/common/base/Status.h"
 #include "velox/common/base/tests/GTestUtils.h"
 
 namespace facebook::velox::encoding {
 
-class Base64Test : public ::testing::Test {};
+class Base64Test : public ::testing::Test {
+ protected:
+  void checkDecodedSize(
+      const std::string& encodedString,
+      size_t expectedEncodedSize,
+      size_t expectedDecodedSize) {
+    size_t encodedSize = expectedEncodedSize;
+    size_t decodedSize = 0;
+    EXPECT_EQ(
+        Status::OK(),
+        Base64::calculateDecodedSize(encodedString, encodedSize, decodedSize));
+    EXPECT_EQ(expectedEncodedSize, encodedSize);
+    EXPECT_EQ(expectedDecodedSize, decodedSize);
+  }
+};
 
 TEST_F(Base64Test, fromBase64) {
   EXPECT_EQ("Hello, World!", Base64::decode("SGVsbG8sIFdvcmxkIQ=="));
@@ -43,49 +56,23 @@ TEST_F(Base64Test, fromBase64) {
 }
 
 TEST_F(Base64Test, calculateDecodedSizeProperSize) {
-  size_t encoded_size{0};
-  size_t decoded_size{0};
+  checkDecodedSize("SGVsbG8sIFdvcmxkIQ==", 18, 13);
+  checkDecodedSize("SGVsbG8sIFdvcmxkIQ", 18, 13);
+  checkDecodedSize("QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4=", 31, 23);
+  checkDecodedSize("QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4", 31, 23);
+  checkDecodedSize("MTIzNDU2Nzg5MA==", 14, 10);
+  checkDecodedSize("MTIzNDU2Nzg5MA", 14, 10);
+}
 
-  encoded_size = 20;
-  Base64::calculateDecodedSize(
-      "SGVsbG8sIFdvcmxkIQ==", encoded_size, decoded_size);
-  EXPECT_EQ(18, encoded_size);
-  EXPECT_EQ(13, decoded_size);
+TEST_F(Base64Test, calculateDecodedSizeImproperSize) {
+  size_t encodedSize{21};
+  size_t decodedSize;
 
-  encoded_size = 18;
-  Base64::calculateDecodedSize(
-      "SGVsbG8sIFdvcmxkIQ", encoded_size, decoded_size);
-  EXPECT_EQ(18, encoded_size);
-  EXPECT_EQ(13, decoded_size);
-
-  encoded_size = 21;
   EXPECT_EQ(
       Status::UserError(
           "Base64::decode() - invalid input string: string length is not a multiple of 4."),
       Base64::calculateDecodedSize(
-          "SGVsbG8sIFdvcmxkIQ===", encoded_size, decoded_size));
-
-  encoded_size = 32;
-  Base64::calculateDecodedSize(
-      "QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4=", encoded_size, decoded_size);
-  EXPECT_EQ(31, encoded_size);
-  EXPECT_EQ(23, decoded_size);
-
-  encoded_size = 31;
-  Base64::calculateDecodedSize(
-      "QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4", encoded_size, decoded_size);
-  EXPECT_EQ(31, encoded_size);
-  EXPECT_EQ(23, decoded_size);
-
-  encoded_size = 16;
-  Base64::calculateDecodedSize("MTIzNDU2Nzg5MA==", encoded_size, decoded_size);
-  EXPECT_EQ(14, encoded_size);
-  EXPECT_EQ(10, decoded_size);
-
-  encoded_size = 14;
-  Base64::calculateDecodedSize("MTIzNDU2Nzg5MA", encoded_size, decoded_size);
-  EXPECT_EQ(14, encoded_size);
-  EXPECT_EQ(10, decoded_size);
+          "SGVsbG8sIFdvcmxkIQ===", encodedSize, decodedSize));
 }
 
 TEST_F(Base64Test, isPadded) {
@@ -98,4 +85,120 @@ TEST_F(Base64Test, numPadding) {
   EXPECT_EQ(1, Base64::numPadding("ABC=", 4));
   EXPECT_EQ(2, Base64::numPadding("AB==", 4));
 }
+
+TEST_F(Base64Test, testDecodeImpl) {
+  constexpr const Base64::ReverseIndex reverseTable = {
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 62,  255,
+      255, 255, 63,  52,  53,  54,  55,  56,  57,  58,  59,  60,  61,  255, 255,
+      255, 255, 255, 255, 255, 0,   1,   2,   3,   4,   5,   6,   7,   8,   9,
+      10,  11,  12,  13,  14,  15,  16,  17,  18,  19,  20,  21,  22,  23,  24,
+      25,  255, 255, 255, 255, 255, 255, 26,  27,  28,  29,  30,  31,  32,  33,
+      34,  35,  36,  37,  38,  39,  40,  41,  42,  43,  44,  45,  46,  47,  48,
+      49,  50,  51,  255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+      255};
+
+  auto testDecode = [&](const std::string_view input,
+                        char* output1,
+                        size_t outputSize,
+                        Status expectedStatus) {
+    EXPECT_EQ(
+        Base64::decodeImpl(
+            input, input.size(), output1, outputSize, reverseTable),
+        expectedStatus);
+  };
+
+  // Predefine buffer sizes and reuse.
+  char output1[20] = {};
+  char output2[1] = {};
+  char output3[1] = {};
+
+  // Invalid characters in the input string
+  testDecode(
+      "SGVsbG8gd29ybGQ$",
+      output1,
+      sizeof(output1),
+      Status::UserError(
+          "Base64::decode() - invalid input string: contains invalid characters."));
+
+  // All characters are padding characters
+  testDecode("====", output1, sizeof(output1), Status::OK());
+
+  // Invalid input size
+  testDecode(
+      "S",
+      output1,
+      sizeof(output1),
+      Status::UserError(
+          "Base64::decode() - invalid input string: string length cannot be 1 more than a multiple of 4."));
+
+  // Valid input without padding characters
+  testDecode("SGVsbG8gd29ybGQ", output1, sizeof(output1), Status::OK());
+  EXPECT_STREQ(output1, "Hello world");
+
+  // Empty input string
+  testDecode("", output2, sizeof(output2), Status::OK());
+  EXPECT_STREQ(output2, "");
+
+  // Invalid input size
+  testDecode(
+      "SGVsbG8gd29ybGQ===",
+      output1,
+      sizeof(output1),
+      Status::UserError(
+          "Base64::decode() - invalid input string: string length is not a multiple of 4."));
+
+  // whiltespaces in the input string
+  testDecode(
+      " SGVsb G8gd2 9ybGQ= ",
+      output1,
+      sizeof(output1),
+      Status::UserError(
+          "Base64::decode() - invalid input string: contains invalid characters."));
+
+  // insufficient buffer size
+  testDecode(
+      " SGVsb G8gd2 9ybGQ= ",
+      output3,
+      sizeof(output3),
+      Status::UserError(
+          "Base64::decode() - invalid output string: output string is too small."));
+}
+
+TEST_F(Base64Test, testEncodeDecodeUrl) {
+  // Lambda function for testing round-trip encoding and decoding
+  auto roundTripTest = [](const std::string& original) {
+    std::string encoded = Base64::encodeUrl(original);
+    std::string decoded = Base64::decodeUrl(encoded);
+    EXPECT_EQ(original, decoded);
+  };
+
+  // Test case 1: Simple string
+  roundTripTest("Hello, World!");
+
+  // Test case 2: Empty string
+  roundTripTest("");
+
+  // Test case 3: Special characters
+  roundTripTest("This is a test: !@#$%^&*()");
+
+  // Test case 4: String with spaces
+  roundTripTest("URL encoding test with spaces");
+
+  // Test case 5: String with numbers and mixed cases
+  roundTripTest("1234567890abcABC");
+
+  // Test case 6: URL-specific characters
+  roundTripTest("Test: /?:@&=+$#");
+}
+
 } // namespace facebook::velox::encoding
