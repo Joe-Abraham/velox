@@ -22,14 +22,14 @@ namespace facebook::velox::encoding {
 class EncoderUtilsTest : public ::testing::Test {};
 
 TEST_F(EncoderUtilsTest, isPadded) {
-  EXPECT_TRUE(isPadded("ABC=", 4));
-  EXPECT_FALSE(isPadded("ABC", 3));
+  EXPECT_TRUE(isPadded("ABC="));
+  EXPECT_FALSE(isPadded("ABC"));
 }
 
 TEST_F(EncoderUtilsTest, numPadding) {
-  EXPECT_EQ(0, numPadding("ABC", 3));
-  EXPECT_EQ(1, numPadding("ABC=", 4));
-  EXPECT_EQ(2, numPadding("AB==", 4));
+  EXPECT_EQ(0, numPadding("ABC"));
+  EXPECT_EQ(1, numPadding("ABC="));
+  EXPECT_EQ(2, numPadding("AB=="));
 }
 
 } // namespace facebook::velox::encoding

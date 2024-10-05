@@ -17,148 +17,69 @@
 #include "velox/common/encode/Base64.h"
 
 #include <gtest/gtest.h>
-#include "velox/common/base/Status.h"
+#include "velox/common/base/Exceptions.h"
 #include "velox/common/base/tests/GTestUtils.h"
 
 namespace facebook::velox::encoding {
 
-class Base64Test : public ::testing::Test {
- protected:
-  void checkDecodedSize(
-      const std::string& encodedString,
-      size_t expectedEncodedSize,
-      size_t expectedDecodedSize) {
-    size_t encodedSize = expectedEncodedSize;
-    size_t decodedSize = 0;
-    EXPECT_EQ(
-        Status::OK(),
-        Base64::calculateDecodedSize(encodedString, encodedSize, decodedSize));
-    EXPECT_EQ(expectedEncodedSize, encodedSize);
-    EXPECT_EQ(expectedDecodedSize, decodedSize);
-  }
-};
+class Base64Test : public ::testing::Test {};
 
 TEST_F(Base64Test, fromBase64) {
-  EXPECT_EQ("Hello, World!", Base64::decode("SGVsbG8sIFdvcmxkIQ=="));
-  EXPECT_EQ(
-      "Base64 encoding is fun.",
-      Base64::decode("QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4="));
-  EXPECT_EQ("Simple text", Base64::decode("U2ltcGxlIHRleHQ="));
-  EXPECT_EQ("1234567890", Base64::decode("MTIzNDU2Nzg5MA=="));
-
-  // Check encoded strings without padding
-  EXPECT_EQ("Hello, World!", Base64::decode("SGVsbG8sIFdvcmxkIQ"));
-  EXPECT_EQ(
-      "Base64 encoding is fun.",
-      Base64::decode("QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4"));
-  EXPECT_EQ("Simple text", Base64::decode("U2ltcGxlIHRleHQ"));
-  EXPECT_EQ("1234567890", Base64::decode("MTIzNDU2Nzg5MA"));
-}
-
-TEST_F(Base64Test, calculateDecodedSizeProperSize) {
-  checkDecodedSize("SGVsbG8sIFdvcmxkIQ==", 18, 13);
-  checkDecodedSize("SGVsbG8sIFdvcmxkIQ", 18, 13);
-  checkDecodedSize("QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4=", 31, 23);
-  checkDecodedSize("QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4", 31, 23);
-  checkDecodedSize("MTIzNDU2Nzg5MA==", 14, 10);
-  checkDecodedSize("MTIzNDU2Nzg5MA", 14, 10);
-}
-
-TEST_F(Base64Test, calculateDecodedSizeImproperSize) {
-  size_t encodedSize{21};
-  size_t decodedSize;
-
-  EXPECT_EQ(
-      Status::UserError(
-          "Base64::decode() - invalid input string: string length is not a multiple of 4."),
-      Base64::calculateDecodedSize(
-          "SGVsbG8sIFdvcmxkIQ===", encodedSize, decodedSize));
-}
-
-TEST_F(Base64Test, testDecodeImpl) {
-  constexpr const Base64::ReverseIndex reverseTable = {
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 62,  255,
-      255, 255, 63,  52,  53,  54,  55,  56,  57,  58,  59,  60,  61,  255, 255,
-      255, 255, 255, 255, 255, 0,   1,   2,   3,   4,   5,   6,   7,   8,   9,
-      10,  11,  12,  13,  14,  15,  16,  17,  18,  19,  20,  21,  22,  23,  24,
-      25,  255, 255, 255, 255, 255, 255, 26,  27,  28,  29,  30,  31,  32,  33,
-      34,  35,  36,  37,  38,  39,  40,  41,  42,  43,  44,  45,  46,  47,  48,
-      49,  50,  51,  255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-      255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
-      255};
-
-  auto testDecode = [&](const std::string_view input,
-                        char* output1,
-                        size_t outputSize,
-                        Status expectedStatus) {
-    EXPECT_EQ(
-        Base64::decodeImpl(
-            input, input.size(), output1, outputSize, reverseTable),
-        expectedStatus);
+  // Lambda function to reduce repetition in test cases
+  auto checkBase64Decode = [](const std::string& expected,
+                              const std::string& encoded) {
+    EXPECT_EQ(expected, Base64::decode(folly::StringPiece(encoded)));
   };
 
-  // Predefine buffer sizes and reuse.
-  char output1[20] = {};
-  char output2[1] = {};
-  char output3[1] = {};
+  // Check encoded strings with padding
+  checkBase64Decode("Hello, World!", "SGVsbG8sIFdvcmxkIQ==");
+  checkBase64Decode(
+      "Base64 encoding is fun.", "QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4=");
+  checkBase64Decode("Simple text", "U2ltcGxlIHRleHQ=");
+  checkBase64Decode("1234567890", "MTIzNDU2Nzg5MA==");
 
-  // Invalid characters in the input string
-  testDecode(
-      "SGVsbG8gd29ybGQ$",
-      output1,
-      sizeof(output1),
-      Status::UserError("invalid input string: contains invalid characters."));
+  // Check encoded strings without padding
+  checkBase64Decode("Hello, World!", "SGVsbG8sIFdvcmxkIQ");
+  checkBase64Decode(
+      "Base64 encoding is fun.", "QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4");
+  checkBase64Decode("Simple text", "U2ltcGxlIHRleHQ");
+  checkBase64Decode("1234567890", "MTIzNDU2Nzg5MA");
+}
 
-  // All characters are padding characters
-  testDecode("====", output1, sizeof(output1), Status::OK());
+TEST_F(Base64Test, calculateDecodedSize) {
+  auto checkDecodedSize = [](std::string_view encodedString,
+                             size_t initialEncodedSize,
+                             size_t expectedEncodedSize,
+                             size_t expectedDecodedSize,
+                             Status expectedStatus = Status::OK()) {
+    size_t encoded_size = initialEncodedSize;
+    size_t decoded_size = 0;
+    Status status =
+        calculateDecodedSize(encodedString, encoded_size, decoded_size, 3, 4);
 
-  // Invalid input size
-  testDecode(
-      "S",
-      output1,
-      sizeof(output1),
-      Status::UserError(
-          "Base64::decode() - invalid input string: string length cannot be 1 more than a multiple of 4."));
+    if (expectedStatus.ok()) {
+      EXPECT_EQ(Status::OK(), status);
+      EXPECT_EQ(expectedEncodedSize, encoded_size);
+      EXPECT_EQ(expectedDecodedSize, decoded_size);
+    } else {
+      EXPECT_EQ(expectedStatus, status);
+    }
+  };
 
-  // Valid input without padding characters
-  testDecode("SGVsbG8gd29ybGQ", output1, sizeof(output1), Status::OK());
-  EXPECT_STREQ(output1, "Hello world");
-
-  // Empty input string
-  testDecode("", output2, sizeof(output2), Status::OK());
-  EXPECT_STREQ(output2, "");
-
-  // Invalid input size
-  testDecode(
-      "SGVsbG8gd29ybGQ===",
-      output1,
-      sizeof(output1),
+  // Using the lambda to reduce repetitive code
+  checkDecodedSize("SGVsbG8sIFdvcmxkIQ==", 20, 18, 13);
+  checkDecodedSize("SGVsbG8sIFdvcmxkIQ", 18, 18, 13);
+  checkDecodedSize(
+      "SGVsbG8sIFdvcmxkIQ===",
+      21,
+      0,
+      0,
       Status::UserError(
           "Base64::decode() - invalid input string: string length is not a multiple of 4."));
-
-  // whiltespaces in the input string
-  testDecode(
-      " SGVsb G8gd2 9ybGQ= ",
-      output1,
-      sizeof(output1),
-      Status::UserError("invalid input string: contains invalid characters."));
-
-  // insufficient buffer size
-  testDecode(
-      " SGVsb G8gd2 9ybGQ= ",
-      output3,
-      sizeof(output3),
-      Status::UserError(
-          "Base64::decode() - invalid output string: output string is too small."));
+  checkDecodedSize("QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4=", 32, 31, 23);
+  checkDecodedSize("QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4", 31, 31, 23);
+  checkDecodedSize("MTIzNDU2Nzg5MA==", 16, 14, 10);
+  checkDecodedSize("MTIzNDU2Nzg5MA", 14, 14, 10);
 }
 
 TEST_F(Base64Test, testEncodeDecodeUrl) {

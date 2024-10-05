@@ -23,14 +23,16 @@ namespace facebook::velox::encoding {
 /// Padding character used in encoding.
 const static char kPadding = '=';
 
-// Checks if there is padding in encoded input.
-static inline bool isPadded(std::string_view input, size_t inputSize) {
+// Checks if the input Base64 string is padded.
+static inline bool isPadded(std::string_view input) {
+  size_t inputSize{input.size()};
   return (inputSize > 0 && input[inputSize - 1] == kPadding);
 }
 
 // Counts the number of padding characters in encoded input.
-static inline size_t numPadding(std::string_view input, size_t inputSize) {
+static inline size_t numPadding(std::string_view input) {
   size_t numPadding{0};
+  size_t inputSize{input.size()};
   while (inputSize > 0 && input[inputSize - 1] == kPadding) {
     numPadding++;
     inputSize--;
@@ -41,11 +43,11 @@ static inline size_t numPadding(std::string_view input, size_t inputSize) {
 // Validate the character in charset with ReverseIndex table
 template <typename Charset, typename ReverseIndex>
 constexpr bool checkForwardIndex(
-    uint8_t idx,
+    uint8_t index,
     const Charset& charset,
     const ReverseIndex& reverseIndex) {
-  return (reverseIndex[static_cast<uint8_t>(charset[idx])] == idx) &&
-      (idx > 0 ? checkForwardIndex(idx - 1, charset, reverseIndex) : true);
+  return (reverseIndex[static_cast<uint8_t>(charset[index])] == index) &&
+      (index > 0 ? checkForwardIndex(index - 1, charset, reverseIndex) : true);
 }
 
 // Searches for a character within a charset up to a certain index.
@@ -53,10 +55,10 @@ template <typename Charset>
 constexpr bool findCharacterInCharset(
     const Charset& charset,
     uint8_t index,
-    const char character) {
+    const char targetChar) {
   return index < charset.size() &&
-      ((charset[index] == character) ||
-       findCharacterInCharset(charset, index + 1, character));
+      ((charset[index] == targetChar) ||
+       findCharacterInCharset(charset, index + 1, targetChar));
 }
 
 // Checks the consistency of a reverse index mapping for a given character set.
@@ -73,17 +75,82 @@ constexpr bool checkReverseIndex(
 
 template <typename ReverseIndexType>
 uint8_t reverseLookup(
-    char p,
+    char encodedChar,
     const ReverseIndexType& reverseIndex,
     Status& status,
     uint8_t kBase) {
-  auto curr = reverseIndex[(uint8_t)p];
+  auto curr = reverseIndex[static_cast<uint8_t>(encodedChar)];
   if (curr >= kBase) {
     status =
         Status::UserError("invalid input string: contains invalid characters.");
     return 0; // Return 0 or any other error code indicating failure
   }
   return curr;
+}
+
+// Returns the actual size of the decoded data. Will also remove the padding
+// length from the 'inputSize'.
+static Status calculateDecodedSize(
+    std::string_view input,
+    size_t& inputSize,
+    size_t& decodedSize,
+    const int binaryBlockByteSize,
+    const int encodedBlockByteSize) {
+  if (inputSize == 0) {
+    decodedSize = 0;
+    return Status::OK();
+  }
+
+  // Check if the input string is padded
+  if (isPadded(input)) {
+    // If padded, ensure that the string length is a multiple of the encoded
+    // block size
+    if (inputSize % encodedBlockByteSize != 0) {
+      return Status::UserError(
+          "calculateDecodedSize() - invalid input string: "
+          "string length is not a multiple of the encoded block size.");
+    }
+
+    decodedSize = (inputSize * binaryBlockByteSize) / encodedBlockByteSize;
+    auto paddingCount = numPadding(input);
+    inputSize -= paddingCount;
+
+    // Adjust the needed size by deducting the bytes corresponding to the
+    // padding from the calculated size.
+    decodedSize -=
+        ((paddingCount * binaryBlockByteSize) + (encodedBlockByteSize - 1)) /
+        encodedBlockByteSize;
+  } else {
+    decodedSize = (inputSize * binaryBlockByteSize) / encodedBlockByteSize;
+  }
+
+  return Status::OK();
+}
+
+// Calculates the encoded size based on input size.
+static size_t calculateEncodedSize(
+    size_t inputSize,
+    bool includePadding,
+    const int binaryBlockByteSize,
+    const int encodedBlockByteSize) {
+  if (inputSize == 0) {
+    return 0;
+  }
+
+  // Calculate the output size assuming that we are including padding.
+  size_t encodedSize =
+      ((inputSize + binaryBlockByteSize - 1) / binaryBlockByteSize) *
+      encodedBlockByteSize;
+
+  if (!includePadding) {
+    // If the padding was not requested, subtract the padding bytes.
+    size_t remainder = inputSize % binaryBlockByteSize;
+    if (remainder != 0) {
+      encodedSize -= (binaryBlockByteSize - remainder);
+    }
+  }
+
+  return encodedSize;
 }
 
 } // namespace facebook::velox::encoding
