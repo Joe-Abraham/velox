@@ -16,56 +16,62 @@
 
 #pragma once
 
-#include <proxygen/httpserver/HTTPServer.h>
+#include <boost/asio.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
 #include "velox/common/memory/Memory.h"
 
-using namespace proxygen;
-
 namespace facebook::velox::functions {
-class ErrorHandler : public RequestHandler {
+
+class session : public std::enable_shared_from_this<session> {
  public:
-  explicit ErrorHandler(int statusCode, std::string message);
-  void onRequest(std::unique_ptr<HTTPMessage> headers) noexcept override;
-  void onBody(std::unique_ptr<folly::IOBuf>) noexcept override;
-  void onEOM() noexcept override;
-  void onUpgrade(UpgradeProtocol protocol) noexcept override;
-  void requestComplete() noexcept override;
-  void onError(ProxygenError err) noexcept override;
+  session(boost::asio::ip::tcp::socket socket, std::string functionPrefix);
+
+  void run();
 
  private:
-  int statusCode_;
-  std::string message_;
-};
+  void do_read();
 
-class RestRequestHandler : public RequestHandler {
- public:
-  explicit RestRequestHandler(const std::string& functionPrefix = "")
-      : functionPrefix_(functionPrefix) {}
-  void onRequest(std::unique_ptr<HTTPMessage> headers) noexcept override;
-  void onBody(std::unique_ptr<folly::IOBuf> body) noexcept override;
-  void onEOM() noexcept override;
-  void onUpgrade(UpgradeProtocol protocol) noexcept override;
-  void requestComplete() noexcept override;
-  void onError(ProxygenError err) noexcept override;
+  void on_read(boost::beast::error_code ec, std::size_t bytes_transferred);
 
- private:
-  std::unique_ptr<folly::IOBuf> body_;
+  void handle_request(
+      boost::beast::http::request<boost::beast::http::string_body> req);
+
+  void on_write(
+      bool close,
+      boost::beast::error_code ec,
+      std::size_t bytes_transferred);
+
+  void do_close();
+
+  boost::asio::ip::tcp::socket socket_;
+  boost::beast::flat_buffer buffer_;
+  std::string functionPrefix_;
+  boost::beast::http::request<boost::beast::http::string_body> req_;
+  boost::beast::http::response<boost::beast::http::string_body> res_;
   std::shared_ptr<memory::MemoryPool> pool_{
       memory::memoryManager()->addLeafPool()};
-  const std::string functionPrefix_;
-  std::string functionName_;
 };
 
-class RestRequestHandlerFactory : public RequestHandlerFactory {
+class listener : public std::enable_shared_from_this<listener> {
  public:
-  explicit RestRequestHandlerFactory(const std::string& functionPrefix = "")
-      : functionPrefix_(functionPrefix) {}
-  void onServerStart(folly::EventBase* evb) noexcept override;
-  void onServerStop() noexcept override;
-  RequestHandler* onRequest(RequestHandler*, HTTPMessage* msg) noexcept
-      override;
+  listener(
+      boost::asio::io_context& ioc,
+      boost::asio::ip::tcp::endpoint endpoint,
+      std::string functionPrefix);
+
+  void run();
 
  private:
-  const std::string functionPrefix_;
+  void do_accept();
+
+  void on_accept(
+      boost::beast::error_code ec,
+      boost::asio::ip::tcp::socket socket);
+
+  boost::asio::io_context& ioc_;
+  boost::asio::ip::tcp::acceptor acceptor_;
+  std::string functionPrefix_;
 };
+
 } // namespace facebook::velox::functions

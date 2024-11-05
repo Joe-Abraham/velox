@@ -13,121 +13,31 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 #pragma once
 
-#include <folly/init/Init.h>
-#include <folly/io/async/EventBase.h>
-#include <folly/io/async/SSLContext.h>
-#include <proxygen/lib/http/HTTPConnector.h>
-#include <proxygen/lib/http/HTTPMessage.h>
-#include <proxygen/lib/http/session/HTTPUpstreamSession.h>
-#include <proxygen/lib/utils/URL.h>
-#include "velox/functions/remote/client/RestClient.h"
-
-using namespace proxygen;
-using namespace folly;
+#include <folly/io/IOBuf.h>
+#include <memory>
+#include <string>
 
 namespace facebook::velox::functions {
 
-class HttpClient : public HTTPConnector::Callback,
-                   public HTTPTransactionHandler {
+class HttpClient {
  public:
-  HttpClient(const URL& url) : url_(url) {}
+  virtual ~HttpClient() = default;
 
-  void send(std::unique_ptr<IOBuf> requestBody) {
-    requestBody_ = std::move(requestBody);
-    connector_ = std::make_unique<HTTPConnector>(
-        this, WheelTimerInstance(std::chrono::milliseconds(1000)));
-    connector_->connect(
-        &evb_,
-        SocketAddress(url_.getHost(), url_.getPort(), true),
-        std::chrono::milliseconds(10000));
-    evb_.loop();
-  }
-
-  std::unique_ptr<IOBuf> getResponseBody() {
-    return std::move(responseBody_);
-  }
-
- private:
-  URL url_;
-  EventBase evb_;
-  std::unique_ptr<HTTPConnector> connector_;
-  std::shared_ptr<HTTPUpstreamSession> session_;
-  std::unique_ptr<IOBuf> requestBody_;
-  std::unique_ptr<IOBuf> responseBody_;
-
-  void connectSuccess(HTTPUpstreamSession* session) noexcept override {
-    session_ = std::shared_ptr<HTTPUpstreamSession>(
-        session, [](HTTPUpstreamSession* s) {
-          // No-op deleter, managed by Proxygen
-        });
-    sendRequest();
-  }
-
-  void connectError(const AsyncSocketException& ex) noexcept override {
-    LOG(ERROR) << "Failed to connect: " << ex.what();
-    evb_.terminateLoopSoon();
-  }
-
-  void sendRequest() {
-    auto txn = session_->newTransaction(this);
-    HTTPMessage req;
-    req.setMethod(HTTPMethod::POST);
-    req.setURL(url_.getUrl());
-
-    req.getHeaders().add(
-        "Content-Length",
-        std::to_string(requestBody_->computeChainDataLength()));
-    req.getHeaders().add("Content-Type", "application/X-presto-pages");
-    req.getHeaders().add("Accept", "application/X-presto-pages");
-
-    txn->sendHeaders(req);
-    txn->sendBody(std::move(requestBody_));
-    txn->sendEOM();
-  }
-
-  void setTransaction(HTTPTransaction*) noexcept override {}
-
-  void detachTransaction() noexcept override {
-    session_.reset();
-    evb_.terminateLoopSoon();
-  }
-
-  void onHeadersComplete(std::unique_ptr<HTTPMessage> msg) noexcept override {
-    LOG(INFO) << "Received headers";
-  }
-
-  void onBody(std::unique_ptr<IOBuf> chain) noexcept override {
-    responseBody_ = std::move(chain);
-  }
-
-  void onEOM() noexcept override {
-    LOG(INFO) << "Transaction complete";
-    session_->drain();
-  }
-
-  void onError(const HTTPException& error) noexcept override {
-    LOG(ERROR) << "Error: " << error.what();
-  }
-
-  void onUpgrade(UpgradeProtocol) noexcept override {}
-  void onTrailers(std::unique_ptr<HTTPHeaders>) noexcept override {}
-  void onEgressPaused() noexcept override {}
-  void onEgressResumed() noexcept override {}
+  virtual std::unique_ptr<folly::IOBuf> performCurlRequest(
+      const std::string& url,
+      std::unique_ptr<folly::IOBuf> requestPayload) = 0;
 };
 
-class RestClient {
+class RestClient : public HttpClient {
  public:
-  RestClient(const std::string& url);
-
-  void invoke_function(
-      std::unique_ptr<IOBuf> request,
-      std::unique_ptr<IOBuf>& response) const;
-
- private:
-  URL url_;
-  std::shared_ptr<HttpClient> httpClient_;
+  std::unique_ptr<folly::IOBuf> performCurlRequest(
+      const std::string& url,
+      std::unique_ptr<folly::IOBuf> requestPayload) override;
 };
+
+std::unique_ptr<HttpClient> getRestClient();
 
 } // namespace facebook::velox::functions

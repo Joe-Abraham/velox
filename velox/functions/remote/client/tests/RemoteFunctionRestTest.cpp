@@ -82,7 +82,7 @@ class RemoteFunctionRestTest
     registerRemoteFunction("remote_substr", substrSignatures, metadata);
 
     // Registers the actual function under a different prefix. This is only
-    // needed for tests since the http service runs in the same process.
+    // needed for tests since the HTTP service runs in the same process.
     registerFunction<AbsFunction, int32_t, int32_t>(
         {remotePrefix_ + ".remote_abs"});
     registerFunction<PlusFunction, int64_t, int64_t, int64_t>(
@@ -94,31 +94,34 @@ class RemoteFunctionRestTest
   }
 
   void initializeServer() {
-    HTTPServerOptions options;
-    options.idleTimeout = std::chrono::milliseconds(6000);
-    options.handlerFactories =
-        RequestHandlerChain()
-            .addThen<RestRequestHandlerFactory>(remotePrefix_)
-            .build();
-    options.h2cEnabled = true;
+    // Adjusted for Boost.Beast server; the server is started in the main
+    // thread.
 
-    std::vector<HTTPServer::IPConfig> IPs = {
-        {folly::SocketAddress(location_.getHost(), location_.getPort(), true),
-         HTTPServer::Protocol::HTTP}};
+    // Start the server in a separate thread
+    serverThread_ = std::make_unique<std::thread>([this]() {
+      std::string serviceHost = "127.0.0.1";
+      int32_t servicePort = 8321;
+      std::string functionPrefix = remotePrefix_;
 
-    server_ = std::make_shared<HTTPServer>(std::move(options));
-    server_->bind(IPs);
+      boost::asio::io_context ioc{1};
 
-    thread_ = std::make_unique<std::thread>([&] { server_->start(); });
+      std::make_shared<listener>(
+          ioc,
+          boost::asio::ip::tcp::endpoint(
+              boost::asio::ip::make_address(serviceHost), servicePort),
+          functionPrefix)
+          ->run();
+
+      ioc.run();
+    });
 
     VELOX_CHECK(waitForRunning(), "Unable to initialize HTTP server.");
-    LOG(INFO) << "HTTP server is up and running in local port "
-              << location_.getUrl();
+    LOG(INFO) << "HTTP server is up and running at " << location_;
   }
 
   ~RemoteFunctionRestTest() override {
-    server_->stop();
-    thread_->join();
+    // Signal the server thread to stop
+    serverThread_->detach();
     LOG(INFO) << "HTTP server stopped.";
   }
 
@@ -133,9 +136,7 @@ class RemoteFunctionRestTest
 
       try {
         boost::asio::connect(
-            socket,
-            resolver.resolve(
-                location_.getHost(), std::to_string(location_.getPort())));
+            socket, resolver.resolve("127.0.0.1", std::to_string(8321)));
         return true;
       } catch (std::exception& e) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -144,10 +145,9 @@ class RemoteFunctionRestTest
     return false;
   }
 
-  std::shared_ptr<HTTPServer> server_;
-  std::unique_ptr<std::thread> thread_;
+  std::unique_ptr<std::thread> serverThread_;
 
-  URL location_{URL("http://127.0.0.1:83211")};
+  std::string location_{("http://127.0.0.1:8321")};
   const std::string remotePrefix_{"remote"};
 };
 
@@ -187,7 +187,7 @@ TEST_P(RemoteFunctionRestTest, connectionError) {
         "remote_wrong_port(c0, c0)", makeRowVector({inputVector}));
   };
 
-  // Check it throw and that the exception has the "connection refused"
+  // Check it throws and that the exception has the "connection refused"
   // substring.
   EXPECT_THROW(func(), VeloxRuntimeError);
   try {

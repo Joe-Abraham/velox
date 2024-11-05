@@ -14,28 +14,20 @@
  * limitations under the License.
  */
 
+#include <boost/asio.hpp>
 #include <folly/init/Init.h>
-#include <proxygen/httpserver/HTTPServer.h>
+#include "RemoteFunctionRestService.h"
 #include "velox/common/memory/Memory.h"
-
 #include "velox/functions/Registerer.h"
-#include "velox/functions/prestosql/Arithmetic.h"
 #include "velox/functions/prestosql/registration/RegistrationFunctions.h"
-#include "velox/functions/remote/server/RemoteFunctionRestService.h"
 
-DEFINE_string(
-    service_host,
-    "127.0.0.1",
-    "Prefix to be added to the functions being registered");
+DEFINE_string(service_host, "127.0.0.1", "Host to bind the service to");
 
-DEFINE_int32(
-    service_port,
-    8321,
-    "Prefix to be added to the functions being registered");
+DEFINE_int32(service_port, 8321, "Port to bind the service to");
 
 DEFINE_string(
     function_prefix,
-    "remote.schema.",
+    "remote.schema",
     "Prefix to be added to the functions being registered");
 
 using namespace ::facebook::velox;
@@ -45,33 +37,18 @@ int main(int argc, char* argv[]) {
   FLAGS_logtostderr = true;
   memory::initializeMemoryManager({});
 
-  // A remote function service should handle the function execution by its own.
-  // But we use Velox framework for quick prototype here
   functions::prestosql::registerAllScalarFunctions(FLAGS_function_prefix);
-  //  registerFunction<functions::PlusFunction, int64_t, int64_t, int64_t>(
-  //          {"remote_plus"});
-  // End of function registration
+  boost::asio::io_context ioc{1};
 
-  LOG(INFO) << "Start HTTP Server at " << "http://" << FLAGS_service_host << ":"
-            << FLAGS_service_port;
+  std::make_shared<functions::listener>(
+      ioc,
+      boost::asio::ip::tcp::endpoint(
+          boost::asio::ip::make_address(FLAGS_service_host),
+          FLAGS_service_port),
+      FLAGS_function_prefix)
+      ->run();
 
-  HTTPServerOptions options;
-  options.idleTimeout = std::chrono::milliseconds(60000);
-  options.handlerFactories =
-      RequestHandlerChain()
-          .addThen<functions::RestRequestHandlerFactory>()
-          .build();
-  options.h2cEnabled = true;
+  ioc.run();
 
-  std::vector<HTTPServer::IPConfig> IPs = {
-      {folly::SocketAddress(FLAGS_service_host, FLAGS_service_port, true),
-       HTTPServer::Protocol::HTTP}};
-
-  HTTPServer server(std::move(options));
-  server.bind(IPs);
-
-  std::thread t([&]() { server.start(); });
-
-  t.join();
   return 0;
 }

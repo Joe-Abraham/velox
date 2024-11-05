@@ -18,7 +18,6 @@
 
 #include <boost/variant.hpp>
 #include <folly/SocketAddress.h>
-#include <proxygen/lib/utils/URL.h>
 #include "velox/expression/VectorFunction.h"
 #include "velox/functions/remote/if/gen-cpp2/RemoteFunction_types.h"
 
@@ -29,7 +28,7 @@ struct RemoteVectorFunctionMetadata : public exec::VectorFunctionMetadata {
   /// Or Network address of the servr to communicate with. Note that this can
   /// hold a network location (ip/port pair) or a unix domain socket path (see
   /// SocketAddress::makeFromPath()).
-  boost::variant<folly::SocketAddress, proxygen::URL> location;
+  boost::variant<folly::SocketAddress, std::string> location;
 
   /// The serialization format to be used when sending data to the remote.
   remote::PageFormat serdeFormat{remote::PageFormat::PRESTO_PAGE};

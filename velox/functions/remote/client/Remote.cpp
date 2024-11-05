@@ -20,7 +20,6 @@
 #include "velox/common/memory/ByteStream.h"
 #include "velox/expression/Expr.h"
 #include "velox/expression/VectorFunction.h"
-#include "velox/functions/remote/client/RestClient.h"
 #include "velox/functions/remote/client/ThriftClient.h"
 #include "velox/functions/remote/if/GetSerde.h"
 #include "velox/functions/remote/if/gen-cpp2/RemoteFunctionServiceAsyncClient.h"
@@ -29,18 +28,17 @@
 #include "velox/vector/FlatVector.h"
 #include "velox/vector/VectorStream.h"
 
-#include <cctype>
-#include <iomanip>
+#include <fmt/format.h>
 #include <sstream>
 #include <string>
 
+#include "RestClient.h"
+
 using namespace folly;
-using namespace proxygen;
 namespace facebook::velox::functions {
 namespace {
 
 std::string serializeType(const TypePtr& type) {
-  // Use hive type serializer.
   return type::fbhive::HiveTypeSerializer::serialize(type);
 }
 
@@ -72,13 +70,16 @@ class RemoteFunction : public exec::VectorFunction {
   RemoteFunction(
       const std::string& functionName,
       const std::vector<exec::VectorFunctionArg>& inputArgs,
-      const RemoteVectorFunctionMetadata& metadata)
-      : functionName_(functionName), metadata_(metadata) {
+      const RemoteVectorFunctionMetadata& metadata,
+      std::unique_ptr<HttpClient> httpClient = nullptr)
+      : functionName_(functionName),
+        restClient_(httpClient ? std::move(httpClient) : getRestClient()),
+        metadata_(metadata) {
     if (metadata.location.type() == typeid(SocketAddress)) {
       location_ = boost::get<SocketAddress>(metadata.location);
       thriftClient_ = getThriftClient(location_, &eventBase_);
-    } else if (metadata.location.type() == typeid(URL)) {
-      url_ = boost::get<URL>(metadata.location);
+    } else if (metadata.location.type() == typeid(std::string)) {
+      url_ = boost::get<std::string>(metadata.location);
     }
 
     std::vector<TypePtr> types;
@@ -101,7 +102,7 @@ class RemoteFunction : public exec::VectorFunction {
     try {
       if ((metadata_.location.type() == typeid(SocketAddress))) {
         applyRemote(rows, args, outputType, context, result);
-      } else if (metadata_.location.type() == typeid(URL)) {
+      } else if (metadata_.location.type() == typeid(std::string)) {
         applyRestRemote(rows, args, outputType, context, result);
       }
     } catch (const VeloxRuntimeError&) {
@@ -119,18 +120,7 @@ class RemoteFunction : public exec::VectorFunction {
       exec::EvalCtx& context,
       VectorPtr& result) const {
     try {
-      std::string fullUrl = fmt::format(
-          "{}/v1/functions/{}/{}/{}/{}",
-          url_.getUrl(),
-          metadata_.schema.value_or("default"),
-          extractFunctionName(functionName_),
-          urlEncode(metadata_.functionId.value_or("default_function_id")),
-          metadata_.version.value_or("1"));
-
-      // Serialize the input data
       serializer::presto::PrestoVectorSerde serde;
-      serializer::presto::PrestoVectorSerde::PrestoOptions options;
-
       auto remoteRowVector = std::make_shared<RowVector>(
           context.pool(),
           remoteInputType_,
@@ -138,22 +128,26 @@ class RemoteFunction : public exec::VectorFunction {
           rows.end(),
           std::move(args));
 
-      // Serialize the RowVector into an IOBuf (binary format)
-      IOBuf payload = rowVectorToIOBuf(
-          remoteRowVector, rows.end(), *context.pool(), &serde);
+      std::unique_ptr<IOBuf> requestBody =
+          std::make_unique<IOBuf>(rowVectorToIOBuf(
+              remoteRowVector, rows.end(), *context.pool(), &serde));
 
-      // Send the serialized data to the remote function via RestClient
-      RestClient restClient(fullUrl);
-      std::unique_ptr<IOBuf> responseBody;
-      restClient.invoke_function(
-          std::make_unique<IOBuf>(std::move(payload)), (responseBody));
+      const std::string fullUrl = fmt::format(
+          "{}/v1/functions/{}/{}/{}/{}",
+          url_,
+          metadata_.schema.value_or("default"),
+          extractFunctionName(functionName_),
+          urlEncode(metadata_.functionId.value_or("default_function_id")),
+          metadata_.version.value_or("1"));
+
+      std::unique_ptr<IOBuf> responseBody =
+          restClient_->performCurlRequest(fullUrl, std::move(requestBody));
 
       auto outputRowVector = IOBufToRowVector(
           *responseBody, ROW({outputType}), *context.pool(), &serde);
-      result = outputRowVector->childAt(0);
 
+      result = outputRowVector->childAt(0);
     } catch (const std::exception& e) {
-      // Catch and handle any exceptions thrown during the process
       VELOX_FAIL(
           "Error while executing remote function '{}': {}",
           functionName_,
@@ -238,11 +232,11 @@ class RemoteFunction : public exec::VectorFunction {
   }
 
   const std::string functionName_;
-
   EventBase eventBase_;
   std::unique_ptr<RemoteFunctionClient> thriftClient_;
+  std::unique_ptr<HttpClient> restClient_;
   SocketAddress location_;
-  URL url_;
+  std::string url_;
   RowTypePtr remoteInputType_;
   std::vector<std::string> serializedInputTypes_;
   const RemoteVectorFunctionMetadata metadata_;

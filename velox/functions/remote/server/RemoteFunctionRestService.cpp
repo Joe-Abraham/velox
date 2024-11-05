@@ -14,11 +14,10 @@
  * limitations under the License.
  */
 
-#include "velox/functions/remote/server/RemoteFunctionRestService.h"
-#include <proxygen/httpserver/RequestHandler.h>
-#include <proxygen/httpserver/ResponseBuilder.h>
-#include <serializers/PrestoSerializer.h>
+#include "RemoteFunctionRestService.h"
 
+#include <boost/beast/version.hpp>
+#include <serializers/PrestoSerializer.h>
 #include "velox/expression/Expr.h"
 #include "velox/type/fbhive/HiveTypeParser.h"
 #include "velox/vector/VectorStream.h"
@@ -26,19 +25,20 @@
 namespace facebook::velox::functions {
 
 namespace {
+
 struct InternalFunctionSignature {
   std::vector<std::string> argumentTypes;
   std::string returnType;
 };
 
-// Initialize a map with function details
 std::map<std::string, InternalFunctionSignature> internalFunctionSignatureMap =
     {
         {"remote_abs", {{"integer"}, "integer"}},
         {"remote_plus", {{"bigint", "bigint"}, "bigint"}},
         {"remote_divide", {{"double", "double"}, "double"}},
         {"remote_substr", {{"varchar", "integer"}, "varchar"}},
-        // Add more functions here as needed
+        // Add more functions here as needed, registerRemoteFunction should be
+        // called to use the functions mentioned in this map
 };
 
 TypePtr deserializeType(const std::string& input) {
@@ -61,14 +61,6 @@ RowTypePtr deserializeArgTypes(const std::vector<std::string>& argTypes) {
   return ROW(std::move(typeNames), std::move(argumentTypes));
 }
 
-std::string getFunctionName(
-    const std::string& prefix,
-    const std::string& functionName) {
-  return prefix.empty() ? functionName
-                        : fmt::format("{}.{}", prefix, functionName);
-}
-} // namespace
-
 std::vector<core::TypedExprPtr> getExpressions(
     const RowTypePtr& inputType,
     const TypePtr& returnType,
@@ -83,32 +75,112 @@ std::vector<core::TypedExprPtr> getExpressions(
       returnType, std::move(inputs), functionName)};
 }
 
-void RestRequestHandler::onRequest(
-    std::unique_ptr<HTTPMessage> headers) noexcept {
-  const std::string& path = headers->getURL();
+std::string getFunctionName(
+    const std::string& prefix,
+    const std::string& functionName) {
+  return prefix.empty() ? functionName
+                        : fmt::format("{}.{}", prefix, functionName);
+}
 
-  // Split the path by '/'
+} // namespace
+
+session::session(
+    boost::asio::ip::tcp::socket socket,
+    std::string functionPrefix)
+    : socket_(std::move(socket)), functionPrefix_(std::move(functionPrefix)) {}
+
+void session::run() {
+  do_read();
+}
+
+void session::do_read() {
+  auto self = shared_from_this();
+  boost::beast::http::async_read(
+      socket_,
+      buffer_,
+      req_,
+      [self](boost::beast::error_code ec, std::size_t bytes_transferred) {
+        self->on_read(ec, bytes_transferred);
+      });
+}
+
+void session::on_read(
+    boost::beast::error_code ec,
+    std::size_t bytes_transferred) {
+  boost::ignore_unused(bytes_transferred);
+
+  if (ec == boost::beast::http::error::end_of_stream) {
+    return do_close();
+  }
+
+  if (ec) {
+    LOG(ERROR) << "Read error: " << ec.message();
+    return;
+  }
+
+  handle_request(std::move(req_));
+}
+
+void session::handle_request(
+    boost::beast::http::request<boost::beast::http::string_body> req) {
+  res_.version(req.version());
+  res_.set(boost::beast::http::field::server, BOOST_BEAST_VERSION_STRING);
+
+  if (req.method() != boost::beast::http::verb::post) {
+    res_.result(boost::beast::http::status::method_not_allowed);
+    res_.set(boost::beast::http::field::content_type, "text/plain");
+    res_.body() = "Only POST method is allowed";
+    res_.prepare_payload();
+
+    auto self = shared_from_this();
+    boost::beast::http::async_write(
+        socket_,
+        res_,
+        [self](boost::beast::error_code ec, std::size_t bytes_transferred) {
+          self->on_write(true, ec, bytes_transferred);
+        });
+    return;
+  }
+
+  std::string path = req.target();
+
+  // Expected path format:
+  // /v1/functions/{schema}/{functionName}/{functionId}/{version} Split the
+  // path by '/'
   std::vector<std::string> pathComponents;
   folly::split('/', path, pathComponents);
 
-  // Check if the path has enough components
-  if (pathComponents.size() >= 5) {
-    // Extract the functionName from the path
-    // Assuming the functionName is the 5th component
-    functionName_ = pathComponents[6];
-  }
-}
+  std::string functionName;
+  if (pathComponents.size() >= 7 && pathComponents[1] == "v1" &&
+      pathComponents[2] == "functions") {
+    functionName = pathComponents[4];
+  } else {
+    res_.result(boost::beast::http::status::bad_request);
+    res_.set(boost::beast::http::field::content_type, "text/plain");
+    res_.body() = "Invalid request path";
+    res_.prepare_payload();
 
-void RestRequestHandler::onEOM() noexcept {
+    auto self = shared_from_this();
+    boost::beast::http::async_write(
+        socket_,
+        res_,
+        [self](boost::beast::error_code ec, std::size_t bytes_transferred) {
+          self->on_write(true, ec, bytes_transferred);
+        });
+    return;
+  }
+
   try {
     const auto& functionSignature =
-        internalFunctionSignatureMap.at(functionName_);
+        internalFunctionSignatureMap.at(functionName);
 
     auto inputType = deserializeArgTypes(functionSignature.argumentTypes);
     auto returnType = deserializeType(functionSignature.returnType);
 
     serializer::presto::PrestoVectorSerde serde;
-    auto inputVector = IOBufToRowVector(*body_, inputType, *pool_, &serde);
+    auto inputBuffer = folly::IOBuf::copyBuffer(req.body());
+    auto inputVector =
+        IOBufToRowVector(*inputBuffer, inputType, *pool_, &serde);
 
     const vector_size_t numRows = inputVector->size();
     SelectivityVector rows{numRows};
@@ -120,7 +192,7 @@ void RestRequestHandler::onEOM() noexcept {
         getExpressions(
             inputType,
             returnType,
-            getFunctionName(functionPrefix_, functionName_)),
+            getFunctionName(functionPrefix_, functionName)),
         &execCtx};
     exec::EvalCtx evalCtx(&execCtx, &exprSet, inputVector.get());
 
@@ -134,76 +206,115 @@ void RestRequestHandler::onEOM() noexcept {
     auto payload =
         rowVectorToIOBuf(outputRowVector, rows.end(), *pool_, &serde);
 
-    ResponseBuilder(downstream_)
-        .status(200, "OK")
-        .body(std::make_unique<folly::IOBuf>(payload))
-        .sendWithEOM();
+    res_.result(boost::beast::http::status::ok);
+    res_.set(
+        boost::beast::http::field::content_type, "application/octet-stream");
+    res_.body() = payload.moveToFbString().toStdString();
+    res_.prepare_payload();
+
+    auto self = shared_from_this();
+    boost::beast::http::async_write(
+        socket_,
+        res_,
+        [self](boost::beast::error_code ec, std::size_t bytes_transferred) {
+          self->on_write(false, ec, bytes_transferred);
+        });
 
   } catch (const std::exception& ex) {
     LOG(ERROR) << ex.what();
-    ResponseBuilder(downstream_)
-        .status(500, "Internal Server Error")
-        .body(folly::IOBuf::copyBuffer(ex.what()))
-        .sendWithEOM();
+    res_.result(boost::beast::http::status::internal_server_error);
+    res_.set(boost::beast::http::field::content_type, "text/plain");
+    res_.body() = ex.what();
+    res_.prepare_payload();
+
+    auto self = shared_from_this();
+    boost::beast::http::async_write(
+        socket_,
+        res_,
+        [self](boost::beast::error_code ec, std::size_t bytes_transferred) {
+          self->on_write(true, ec, bytes_transferred);
+        });
   }
 }
 
-void RestRequestHandler::onBody(std::unique_ptr<folly::IOBuf> body) noexcept {
-  if (body) {
-    body_ = std::move(body);
+void session::on_write(
+    bool close,
+    boost::beast::error_code ec,
+    std::size_t bytes_transferred) {
+  boost::ignore_unused(bytes_transferred);
+
+  if (ec) {
+    LOG(ERROR) << "Write error: " << ec.message();
+    return;
+  }
+
+  if (close) {
+    return do_close();
+  }
+
+  req_ = {};
+
+  do_read();
+}
+
+void session::do_close() {
+  boost::beast::error_code ec;
+  socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_send, ec);
+}
+
+listener::listener(
+    boost::asio::io_context& ioc,
+    boost::asio::ip::tcp::endpoint endpoint,
+    std::string functionPrefix)
+    : ioc_(ioc), acceptor_(ioc), functionPrefix_(std::move(functionPrefix)) {
+  boost::beast::error_code ec;
+
+  acceptor_.open(endpoint.protocol(), ec);
+  if (ec) {
+    LOG(ERROR) << "Open error: " << ec.message();
+    return;
+  }
+
+  acceptor_.set_option(boost::asio::socket_base::reuse_address(true), ec);
+  if (ec) {
+    LOG(ERROR) << "Set_option error: " << ec.message();
+    return;
+  }
+
+  acceptor_.bind(endpoint, ec);
+  if (ec) {
+    LOG(ERROR) << "Bind error: " << ec.message();
+    return;
+  }
+
+  acceptor_.listen(boost::asio::socket_base::max_listen_connections, ec);
+  if (ec) {
+    LOG(ERROR) << "Listen error: " << ec.message();
+    return;
   }
 }
 
-void RestRequestHandler::onUpgrade(UpgradeProtocol /*protocol*/) noexcept {
-  // handler doesn't support upgrades
+void listener::run() {
+  do_accept();
 }
 
-void RestRequestHandler::requestComplete() noexcept {
-  delete this;
+void listener::do_accept() {
+  acceptor_.async_accept(
+      [self = shared_from_this()](
+          boost::beast::error_code ec, boost::asio::ip::tcp::socket socket) {
+        self->on_accept(ec, std::move(socket));
+      });
 }
 
-void RestRequestHandler::onError(ProxygenError /*err*/) noexcept {
-  delete this;
-}
-
-// ErrorHandler
-ErrorHandler::ErrorHandler(int statusCode, std::string message)
-    : statusCode_(statusCode), message_(std::move(message)) {}
-
-void ErrorHandler::onRequest(std::unique_ptr<HTTPMessage>) noexcept {
-  ResponseBuilder(downstream_)
-      .status(statusCode_, "Error")
-      .body(std::move(message_))
-      .sendWithEOM();
-}
-
-void ErrorHandler::onEOM() noexcept {}
-
-void ErrorHandler::onBody(std::unique_ptr<folly::IOBuf> body) noexcept {}
-
-void ErrorHandler::onUpgrade(UpgradeProtocol protocol) noexcept {
-  // handler doesn't support upgrades
-}
-
-void ErrorHandler::requestComplete() noexcept {
-  delete this;
-}
-
-void ErrorHandler::onError(ProxygenError err) noexcept {
-  delete this;
-}
-
-// RestRequestHandlerFactory
-void RestRequestHandlerFactory::onServerStart(folly::EventBase* evb) noexcept {}
-
-void RestRequestHandlerFactory::onServerStop() noexcept {}
-
-RequestHandler* RestRequestHandlerFactory::onRequest(
-    proxygen::RequestHandler*,
-    proxygen::HTTPMessage* msg) noexcept {
-  if (msg->getMethod() != HTTPMethod::POST) {
-    return new ErrorHandler(405, "Only POST method is allowed");
+void listener::on_accept(
+    boost::beast::error_code ec,
+    boost::asio::ip::tcp::socket socket) {
+  if (ec) {
+    LOG(ERROR) << "Accept error: " << ec.message();
+  } else {
+    std::make_shared<session>(std::move(socket), functionPrefix_)->run();
   }
-  return new RestRequestHandler(functionPrefix_);
+  do_accept();
 }
+
 } // namespace facebook::velox::functions
