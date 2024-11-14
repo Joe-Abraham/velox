@@ -36,6 +36,7 @@ add_test(velox_functions_remote_client_rest_test
 
 target_link_libraries(
   velox_functions_remote_client_rest_test
+        velox_functions_remote_rest_client
   velox_functions_remote_server_rest
   velox_functions_remote
   velox_functions_test_lib
