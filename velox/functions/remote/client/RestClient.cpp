@@ -18,7 +18,6 @@
 
 #include <curl/curl.h>
 #include <folly/io/IOBufQueue.h>
-#include <simdjson.h>
 
 #include "velox/common/base/Exceptions.h"
 
