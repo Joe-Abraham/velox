@@ -16,9 +16,12 @@ velox_add_library(velox_functions_remote_thrift_client ThriftClient.cpp)
 velox_link_libraries(velox_functions_remote_thrift_client
                      PUBLIC remote_function_thrift FBThrift::thriftcpp2)
 
-add_library(velox_functions_remote_rest_client RestClient.cpp)
-target_link_libraries(
-  velox_functions_remote_rest_client Folly::folly CURL::libcurl)
+find_package(CURL REQUIRED)
+include_directories(${CURL_INCLUDE_DIRS})
+
+velox_add_library(velox_functions_remote_rest_client RestClient.cpp)
+velox_link_libraries(velox_functions_remote_rest_client Folly::folly
+                     ${CURL_LIBRARIES})
 
 velox_add_library(velox_functions_remote Remote.cpp)
 velox_link_libraries(
