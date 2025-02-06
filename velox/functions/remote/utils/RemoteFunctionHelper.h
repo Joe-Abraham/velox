@@ -23,46 +23,17 @@
 #include "velox/type/fbhive/HiveTypeParser.h"
 
 namespace facebook::velox::functions {
-inline std::string getFunctionName(
+std::string getFunctionName(
     const std::string& prefix,
-    const std::string& functionName) {
-  return prefix.empty() ? functionName
-                        : fmt::format("{}.{}", prefix, functionName);
-}
+    const std::string& functionName);
 
-inline TypePtr deserializeType(const std::string& input) {
-  // Use hive type parser/serializer.
-  return type::fbhive::HiveTypeParser().parse(input);
-}
+TypePtr deserializeType(const std::string& input);
 
-inline RowTypePtr deserializeArgTypes(
-    const std::vector<std::string>& argTypes) {
-  const size_t argCount = argTypes.size();
+RowTypePtr deserializeArgTypes(const std::vector<std::string>& argTypes);
 
-  std::vector<TypePtr> argumentTypes;
-  std::vector<std::string> typeNames;
-  argumentTypes.reserve(argCount);
-  typeNames.reserve(argCount);
-
-  for (size_t i = 0; i < argCount; ++i) {
-    argumentTypes.emplace_back(deserializeType(argTypes[i]));
-    typeNames.emplace_back(fmt::format("c{}", i));
-  }
-  return ROW(std::move(typeNames), std::move(argumentTypes));
-}
-
-inline std::vector<core::TypedExprPtr> getExpressions(
+std::vector<core::TypedExprPtr> getExpressions(
     const RowTypePtr& inputType,
     const TypePtr& returnType,
-    const std::string& functionName) {
-  std::vector<core::TypedExprPtr> inputs;
-  for (size_t i = 0; i < inputType->size(); ++i) {
-    inputs.push_back(std::make_shared<core::FieldAccessTypedExpr>(
-        inputType->childAt(i), inputType->nameOf(i)));
-  }
-
-  return {std::make_shared<core::CallTypedExpr>(
-      returnType, std::move(inputs), functionName)};
-}
+    const std::string& functionName);
 
 } // namespace facebook::velox::functions
