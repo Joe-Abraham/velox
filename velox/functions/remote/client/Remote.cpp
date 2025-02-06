@@ -40,29 +40,6 @@ std::string serializeType(const TypePtr& type) {
   return type::fbhive::HiveTypeSerializer::serialize(type);
 }
 
-std::string extractFunctionName(const std::string& input) {
-  size_t lastDot = input.find_last_of('.');
-  if (lastDot != std::string::npos) {
-    return input.substr(lastDot + 1);
-  }
-  return input;
-}
-
-std::string urlEncode(const std::string& value) {
-  std::ostringstream escaped;
-  escaped.fill('0');
-  escaped << std::hex;
-  for (char c : value) {
-    if (isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ||
-        c == '.' || c == '~') {
-      escaped << c;
-    } else {
-      escaped << '%' << std::setw(2) << int(static_cast<unsigned char>(c));
-    }
-  }
-  return escaped.str();
-}
-
 class RemoteFunction : public exec::VectorFunction {
  public:
   RemoteFunction(
@@ -131,18 +108,8 @@ class RemoteFunction : public exec::VectorFunction {
           std::make_unique<IOBuf>(rowVectorToIOBuf(
               remoteRowVector, rows.end(), *context.pool(), &serde));
 
-      // Because location_ is a variant, we must get the string:
-      const auto& url = boost::get<std::string>(location_);
-      const std::string fullUrl = fmt::format(
-          "{}/v1/functions/{}/{}/{}/{}",
-          url,
-          metadata_.schema.value_or("default"),
-          extractFunctionName(functionName_),
-          urlEncode(metadata_.functionId.value_or("default_function_id")),
-          metadata_.version.value_or("1"));
-
       std::unique_ptr<IOBuf> responseBody =
-          restClient_->invokeFunction(fullUrl, std::move(requestBody));
+          restClient_->invokeFunction(boost::get<std::string>(location_), std::move(requestBody));
 
       auto outputRowVector = IOBufToRowVector(
           *responseBody, ROW({outputType}), *context.pool(), &serde);
