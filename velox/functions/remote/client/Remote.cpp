@@ -51,12 +51,7 @@ class RemoteFunction : public exec::VectorFunction {
         serdeFormat_(metadata.serdeFormat),
         serde_(getSerde(serdeFormat_)),
         location_(metadata.location) {
-    if (metadata.location.type() == typeid(SocketAddress)) {
-      thriftClient_ =
-          getThriftClient(boost::get<SocketAddress>(location_), &eventBase_);
-    } else if (metadata.location.type() == typeid(std::string)) {
-      restClient_ = getRestClient();
-    }
+    boost::apply_visitor(*this, location_);
 
     std::vector<TypePtr> types;
     types.reserve(inputArgs.size());
@@ -69,6 +64,14 @@ class RemoteFunction : public exec::VectorFunction {
     remoteInputType_ = ROW(std::move(types));
   }
 
+  void operator()(const SocketAddress& address) {
+    thriftClient_ = getThriftClient(address, &eventBase_);
+  }
+
+  void operator()(const std::string& url) {
+    restClient_ = getRestClient();
+  }
+
   void apply(
       const SelectivityVector& rows,
       std::vector<VectorPtr>& args,
@@ -76,11 +79,9 @@ class RemoteFunction : public exec::VectorFunction {
       exec::EvalCtx& context,
       VectorPtr& result) const override {
     try {
-      if ((metadata_.location.type() == typeid(SocketAddress))) {
-        applyRemote(rows, args, outputType, context, result);
-      } else if (metadata_.location.type() == typeid(std::string)) {
-        applyRestRemote(rows, args, outputType, context, result);
-      }
+      boost::apply_visitor(
+          ApplyRemote{rows, args, outputType, context, result, *this},
+          location_);
     } catch (const VeloxRuntimeError&) {
       throw;
     } catch (const std::exception&) {
@@ -89,109 +90,127 @@ class RemoteFunction : public exec::VectorFunction {
   }
 
  private:
-  void applyRestRemote(
-      const SelectivityVector& rows,
-      const std::vector<VectorPtr>& args,
-      const TypePtr& outputType,
-      const exec::EvalCtx& context,
-      VectorPtr& result) const {
-    try {
-      serializer::presto::PrestoVectorSerde serde;
+  struct ApplyRemote : public boost::static_visitor<> {
+    const SelectivityVector& rows;
+    const std::vector<VectorPtr>& args;
+    const TypePtr& outputType;
+    exec::EvalCtx& context;
+    VectorPtr& result;
+    const RemoteFunction& parent;
+
+    ApplyRemote(
+        const SelectivityVector& r,
+        const std::vector<VectorPtr>& a,
+        const TypePtr& ot,
+        exec::EvalCtx& c,
+        VectorPtr& res,
+        const RemoteFunction& p)
+        : rows(r),
+          args(a),
+          outputType(ot),
+          context(c),
+          result(res),
+          parent(p) {}
+
+    void operator()(const std::string& url) const {
+      try {
+        serializer::presto::PrestoVectorSerde serde;
+        auto remoteRowVector = std::make_shared<RowVector>(
+            context.pool(),
+            parent.remoteInputType_,
+            BufferPtr{},
+            rows.end(),
+            std::move(args));
+
+        std::unique_ptr<IOBuf> requestBody =
+            std::make_unique<IOBuf>(rowVectorToIOBuf(
+                remoteRowVector, rows.end(), *context.pool(), &serde));
+
+        std::unique_ptr<IOBuf> responseBody =
+            parent.restClient_->invokeFunction(
+                boost::get<std::string>(parent.location_),
+                std::move(requestBody));
+
+        auto outputRowVector = IOBufToRowVector(
+            *responseBody, ROW({outputType}), *context.pool(), &serde);
+
+        result = outputRowVector->childAt(0);
+      } catch (const std::exception& e) {
+        VELOX_FAIL(
+            "Error while executing remote function '{}': {}",
+            parent.functionName_,
+            e.what());
+      }
+    }
+
+    void operator()(const SocketAddress& address) const {
+      // Create type and row vector for serialization.
       auto remoteRowVector = std::make_shared<RowVector>(
           context.pool(),
-          remoteInputType_,
+          parent.remoteInputType_,
           BufferPtr{},
           rows.end(),
           std::move(args));
 
-      std::unique_ptr<IOBuf> requestBody =
-          std::make_unique<IOBuf>(rowVectorToIOBuf(
-              remoteRowVector, rows.end(), *context.pool(), &serde));
+      // Send to remote server.
+      remote::RemoteFunctionResponse remoteResponse;
+      remote::RemoteFunctionRequest request;
+      request.throwOnError_ref() = context.throwOnError();
 
-      std::unique_ptr<IOBuf> responseBody =
-          restClient_->invokeFunction(boost::get<std::string>(location_), std::move(requestBody));
+      auto functionHandle = request.remoteFunctionHandle_ref();
+      functionHandle->name_ref() = parent.functionName_;
+      functionHandle->returnType_ref() = serializeType(outputType);
+      functionHandle->argumentTypes_ref() = parent.serializedInputTypes_;
+
+      auto requestInputs = request.inputs_ref();
+      requestInputs->rowCount_ref() = remoteRowVector->size();
+      requestInputs->pageFormat_ref() = parent.serdeFormat_;
+
+      // TODO: serialize only active rows.
+      requestInputs->payload_ref() = rowVectorToIOBuf(
+          remoteRowVector, rows.end(), *context.pool(), parent.serde_.get());
+
+      try {
+        parent.thriftClient_->sync_invokeFunction(remoteResponse, request);
+      } catch (const std::exception& e) {
+        VELOX_FAIL(
+            "Error while executing remote function '{}' at '{}': {}",
+            parent.functionName_,
+            boost::get<SocketAddress>(parent.location_).describe(),
+            e.what());
+      }
 
       auto outputRowVector = IOBufToRowVector(
-          *responseBody, ROW({outputType}), *context.pool(), &serde);
-
+          remoteResponse.get_result().get_payload(),
+          ROW({outputType}),
+          *context.pool(),
+          parent.serde_.get());
       result = outputRowVector->childAt(0);
-    } catch (const std::exception& e) {
-      VELOX_FAIL(
-          "Error while executing remote function '{}': {}",
-          functionName_,
-          e.what());
+
+      if (auto errorPayload = remoteResponse.get_result().errorPayload()) {
+        auto errorsRowVector = IOBufToRowVector(
+            *errorPayload,
+            ROW({VARCHAR()}),
+            *context.pool(),
+            parent.serde_.get());
+        auto errorsVector =
+            errorsRowVector->childAt(0)->asFlatVector<StringView>();
+        VELOX_CHECK(errorsVector, "Should be convertible to flat vector");
+
+        SelectivityVector selectedRows(errorsRowVector->size());
+        selectedRows.applyToSelected([&](vector_size_t i) {
+          if (errorsVector->isNullAt(i)) {
+            return;
+          }
+          try {
+            throw std::runtime_error(errorsVector->valueAt(i));
+          } catch (const std::exception& ex) {
+            context.setError(i, std::current_exception());
+          }
+        });
+      }
     }
-  }
-
-  void applyRemote(
-      const SelectivityVector& rows,
-      std::vector<VectorPtr>& args,
-      const TypePtr& outputType,
-      exec::EvalCtx& context,
-      VectorPtr& result) const {
-    // Create type and row vector for serialization.
-    auto remoteRowVector = std::make_shared<RowVector>(
-        context.pool(),
-        remoteInputType_,
-        BufferPtr{},
-        rows.end(),
-        std::move(args));
-
-    // Send to remote server.
-    remote::RemoteFunctionResponse remoteResponse;
-    remote::RemoteFunctionRequest request;
-    request.throwOnError_ref() = context.throwOnError();
-
-    auto functionHandle = request.remoteFunctionHandle_ref();
-    functionHandle->name_ref() = functionName_;
-    functionHandle->returnType_ref() = serializeType(outputType);
-    functionHandle->argumentTypes_ref() = serializedInputTypes_;
-
-    auto requestInputs = request.inputs_ref();
-    requestInputs->rowCount_ref() = remoteRowVector->size();
-    requestInputs->pageFormat_ref() = serdeFormat_;
-
-    // TODO: serialize only active rows.
-    requestInputs->payload_ref() = rowVectorToIOBuf(
-        remoteRowVector, rows.end(), *context.pool(), serde_.get());
-
-    try {
-      thriftClient_->sync_invokeFunction(remoteResponse, request);
-    } catch (const std::exception& e) {
-      VELOX_FAIL(
-          "Error while executing remote function '{}' at '{}': {}",
-          functionName_,
-          boost::get<SocketAddress>(location_).describe(),
-          e.what());
-    }
-
-    auto outputRowVector = IOBufToRowVector(
-        remoteResponse.get_result().get_payload(),
-        ROW({outputType}),
-        *context.pool(),
-        serde_.get());
-    result = outputRowVector->childAt(0);
-
-    if (auto errorPayload = remoteResponse.get_result().errorPayload()) {
-      auto errorsRowVector = IOBufToRowVector(
-          *errorPayload, ROW({VARCHAR()}), *context.pool(), serde_.get());
-      auto errorsVector =
-          errorsRowVector->childAt(0)->asFlatVector<StringView>();
-      VELOX_CHECK(errorsVector, "Should be convertible to flat vector");
-
-      SelectivityVector selectedRows(errorsRowVector->size());
-      selectedRows.applyToSelected([&](vector_size_t i) {
-        if (errorsVector->isNullAt(i)) {
-          return;
-        }
-        try {
-          throw std::runtime_error(errorsVector->valueAt(i));
-        } catch (const std::exception& ex) {
-          context.setError(i, std::current_exception());
-        }
-      });
-    }
-  }
+  };
 
   const std::string functionName_;
   EventBase eventBase_;
@@ -201,8 +220,6 @@ class RemoteFunction : public exec::VectorFunction {
   std::unique_ptr<VectorSerde> serde_;
 
   boost::variant<SocketAddress, std::string> location_;
-
-  // Depending on which active type we have, one of these clients will be used:
   std::unique_ptr<RemoteFunctionClient> thriftClient_;
   std::unique_ptr<HttpClient> restClient_;
 
