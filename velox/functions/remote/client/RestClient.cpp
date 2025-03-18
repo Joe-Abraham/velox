@@ -60,6 +60,14 @@ std::unique_ptr<IOBuf> RestClient::invokeFunction(
         fullUrl));
   }
 
+  if (response.status_code < 200 || response.status_code >= 300) {
+    VELOX_FAIL(fmt::format(
+        "Server responded with status {}. Message: '{}'. URL: {}",
+        response.status_code,
+        response.text,
+        fullUrl));
+  }
+
   auto outputBuf = IOBuf::copyBuffer(response.text);
   return outputBuf;
 }

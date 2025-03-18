@@ -66,6 +66,14 @@ class RemoteFunctionRestTest
                                .returnType("integer")
                                .argumentType("integer")
                                .build()};
+    auto strLenSignature = {exec::FunctionSignatureBuilder()
+                                .returnType("integer")
+                                .argumentType("varchar")
+                                .build()};
+    auto strTrimSignature = {exec::FunctionSignatureBuilder()
+                                 .returnType("varchar")
+                                 .argumentType("varchar")
+                                 .build()};
 
     auto registerFunction =
         [&](const std::string& functionName,
@@ -77,6 +85,8 @@ class RemoteFunctionRestTest
         };
 
     registerFunction("remote_abs", absSignature, location_);
+    registerFunction("remote_strlen", strLenSignature, location_);
+    registerFunction("remote_trim", strTrimSignature, location_);
     registerFunction("remote_round", roundSignature, location_);
     registerFunction("remote_wrong_port", absSignature, wrongLocation_);
   }
@@ -140,12 +150,25 @@ TEST_F(RemoteFunctionRestTest, absolute) {
   assertEqualVectors(expected, results);
 }
 
-TEST_F(RemoteFunctionRestTest, connectionError) {
-  auto inputVector = makeFlatVector<int32_t>({-10, -20});
-  VELOX_ASSERT_THROW(
-      evaluate<SimpleVector<int32_t>>(
-          "remote_wrong_port(c0)", makeRowVector({inputVector})),
-      "Error communicating with server: ");
+TEST_F(RemoteFunctionRestTest, stringLength) {
+  auto inputVector =
+      makeFlatVector<StringView>({"hello", "from", "remote", "server"});
+  auto results = evaluate<SimpleVector<int32_t>>(
+      "remote_strlen(c0)", makeRowVector({inputVector}));
+
+  auto expected = makeFlatVector<int32_t>({5, 4, 6, 6});
+  assertEqualVectors(expected, results);
+}
+
+TEST_F(RemoteFunctionRestTest, trimWhitespace) {
+  auto inputVector = makeFlatVector<StringView>(
+      {"hello from remote server", "testing remote server"});
+  auto results = evaluate<SimpleVector<StringView>>(
+      "remote_trim(c0)", makeRowVector({inputVector}));
+
+  auto expected = makeFlatVector<StringView>(
+      {"hellofromremoteserver", "testingremoteserver"});
+  assertEqualVectors(expected, results);
 }
 
 TEST_F(RemoteFunctionRestTest, functionNotAvailable) {
@@ -153,7 +176,15 @@ TEST_F(RemoteFunctionRestTest, functionNotAvailable) {
   VELOX_ASSERT_THROW(
       evaluate<SimpleVector<int32_t>>(
           "remote_round(c0)", makeRowVector({inputVector})),
-      "Received corrupted serialized page.");
+      "Function 'remote_round' is not available on the server.");
+}
+
+TEST_F(RemoteFunctionRestTest, connectionError) {
+  auto inputVector = makeFlatVector<int32_t>({-10, -20});
+  VELOX_ASSERT_THROW(
+      evaluate<SimpleVector<int32_t>>(
+          "remote_wrong_port(c0)", makeRowVector({inputVector})),
+      "Error communicating with server: ");
 }
 
 } // namespace

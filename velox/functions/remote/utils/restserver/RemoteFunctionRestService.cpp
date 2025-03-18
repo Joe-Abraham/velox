@@ -67,15 +67,14 @@ void RestSession::onRead(
 
 void RestSession::handleRequest(
     boost::beast::http::request<boost::beast::http::string_body> req) {
-  // Prepare the response (common headers, etc.)
   res_.version(req.version());
   res_.set(boost::beast::http::field::server, BOOST_BEAST_VERSION_STRING);
-
-  // Only POST is allowed.
   if (req.method() != boost::beast::http::verb::post) {
     res_.result(boost::beast::http::status::method_not_allowed);
     res_.set(boost::beast::http::field::content_type, "text/plain");
-    res_.body() = "Only POST method is allowed";
+    res_.body() = fmt::format(
+        "Only POST method is allowed. Method used: {}",
+        std::string(req.method_string()));
     res_.prepare_payload();
 
     auto self = shared_from_this();
@@ -88,10 +87,48 @@ void RestSession::handleRequest(
     return;
   }
 
-  std::string path = req.target();
+  auto contentTypeHeader = req[boost::beast::http::field::content_type];
+  if (contentTypeHeader.empty() ||
+      contentTypeHeader != "application/X-presto-pages") {
+    res_.result(boost::beast::http::status::unsupported_media_type);
+    res_.set(boost::beast::http::field::content_type, "text/plain");
+    res_.body() = fmt::format(
+        "Unsupported Content-Type: '{}'. Expecting 'application/X-presto-pages'.",
+        std::string(contentTypeHeader));
 
-  // Expected path format:
-  // /{functionName}
+    res_.prepare_payload();
+
+    auto self = shared_from_this();
+    boost::beast::http::async_write(
+        socket_,
+        res_,
+        [self](boost::beast::error_code ec, std::size_t bytes_transferred) {
+          self->onWrite(true, ec, bytes_transferred);
+        });
+    return;
+  }
+
+  auto acceptHeader = req[boost::beast::http::field::accept];
+  if (acceptHeader.empty() || acceptHeader != "application/X-presto-pages") {
+    res_.result(boost::beast::http::status::not_acceptable);
+    res_.set(boost::beast::http::field::content_type, "text/plain");
+    res_.body() = fmt::format(
+        "Unsupported Accept header: '{}'. Expecting 'application/X-presto-pages'.",
+        std::string(acceptHeader));
+    res_.prepare_payload();
+
+    auto self = shared_from_this();
+    boost::beast::http::async_write(
+        socket_,
+        res_,
+        [self](boost::beast::error_code ec, std::size_t bytes_transferred) {
+          self->onWrite(true, ec, bytes_transferred);
+        });
+    return;
+  }
+
+  // Extract function name from path: /{functionName}
+  std::string path = req.target();
   std::vector<std::string> pathComponents;
   folly::split('/', path, pathComponents);
 
@@ -103,7 +140,6 @@ void RestSession::handleRequest(
     res_.set(boost::beast::http::field::content_type, "text/plain");
     res_.body() = "Invalid request path";
     res_.prepare_payload();
-
     auto self = shared_from_this();
     boost::beast::http::async_write(
         socket_,
@@ -115,91 +151,184 @@ void RestSession::handleRequest(
   }
 
   try {
-    if (functionName != "remote_abs") {
+    serializer::presto::PrestoVectorSerde serde;
+    auto inputBuffer = folly::IOBuf::copyBuffer(req.body());
+
+    if (functionName == "remote_abs") {
+      std::vector<std::string> argTypeNames = {"integer"};
+      std::string returnTypeName = "integer";
+
+      auto argType = type::fbhive::HiveTypeParser().parse(argTypeNames[0]);
+      auto outType = type::fbhive::HiveTypeParser().parse(returnTypeName);
+
+      auto inputVector =
+          IOBufToRowVector(*inputBuffer, ROW({argType}), *pool_, &serde);
+      VELOX_CHECK_EQ(
+          inputVector->childrenSize(),
+          1,
+          "Expected exactly 1 column for function 'remote_abs'.");
+
+      const auto numRows = inputVector->size();
+      auto resultVector = BaseVector::create(argType, numRows, pool_.get());
+
+      auto inputFlat = inputVector->childAt(0)->asFlatVector<int32_t>();
+      auto outFlat = resultVector->asFlatVector<int32_t>();
+      for (vector_size_t i = 0; i < numRows; ++i) {
+        if (inputFlat->isNullAt(i)) {
+          outFlat->setNull(i, true);
+        } else {
+          int32_t val = inputFlat->valueAt(i);
+          outFlat->set(i, std::abs(val));
+        }
+      }
+
+      auto outputRowVector = std::make_shared<RowVector>(
+          pool_.get(),
+          ROW({outType}),
+          BufferPtr(),
+          numRows,
+          std::vector<VectorPtr>{resultVector});
+
+      auto payload = rowVectorToIOBuf(
+          outputRowVector, outputRowVector->size(), *pool_, &serde);
+
+      res_.result(boost::beast::http::status::ok);
+      res_.set(
+          boost::beast::http::field::content_type,
+          "application/X-presto-pages");
+      res_.body() = payload.moveToFbString().toStdString();
+      res_.prepare_payload();
+      auto self = shared_from_this();
+      boost::beast::http::async_write(
+          socket_,
+          res_,
+          [self](boost::beast::error_code ec, std::size_t bytes_transferred) {
+            self->onWrite(false, ec, bytes_transferred);
+          });
+
+    } else if (functionName == "remote_strlen") {
+      std::vector<std::string> argTypeNames = {"varchar"};
+      std::string returnTypeName = "integer";
+
+      auto argType = type::fbhive::HiveTypeParser().parse(argTypeNames[0]);
+      auto outType = type::fbhive::HiveTypeParser().parse(returnTypeName);
+
+      auto inputVector =
+          IOBufToRowVector(*inputBuffer, ROW({argType}), *pool_, &serde);
+
+      VELOX_CHECK_EQ(
+          inputVector->childrenSize(),
+          1,
+          "Expected exactly 1 column for function 'remote_strlen'.");
+
+      const auto numRows = inputVector->size();
+      auto resultVector = BaseVector::create(outType, numRows, pool_.get());
+
+      auto inputFlat = inputVector->childAt(0)->asFlatVector<StringView>();
+      auto outFlat = resultVector->asFlatVector<int32_t>();
+
+      for (vector_size_t i = 0; i < numRows; ++i) {
+        if (inputFlat->isNullAt(i)) {
+          outFlat->setNull(i, true);
+        } else {
+          int32_t stringLen = inputFlat->valueAt(i).size();
+          outFlat->set(i, stringLen);
+        }
+      }
+
+      auto outputRowVector = std::make_shared<RowVector>(
+          pool_.get(),
+          ROW({outType}),
+          BufferPtr(),
+          numRows,
+          std::vector<VectorPtr>{resultVector});
+
+      auto payload = rowVectorToIOBuf(
+          outputRowVector, outputRowVector->size(), *pool_, &serde);
+
+      res_.result(boost::beast::http::status::ok);
+      res_.set(
+          boost::beast::http::field::content_type,
+          "application/X-presto-pages");
+      res_.body() = payload.moveToFbString().toStdString();
+      res_.prepare_payload();
+      auto self = shared_from_this();
+      boost::beast::http::async_write(
+          socket_,
+          res_,
+          [self](boost::beast::error_code ec, std::size_t bytes_transferred) {
+            self->onWrite(false, ec, bytes_transferred);
+          });
+
+    } else if (functionName == "remote_trim") {
+      std::vector<std::string> argTypeNames = {"varchar"};
+      std::string returnTypeName = "varchar";
+
+      auto argType = type::fbhive::HiveTypeParser().parse(argTypeNames[0]);
+      auto outType = type::fbhive::HiveTypeParser().parse(returnTypeName);
+
+      auto inputVector =
+          IOBufToRowVector(*inputBuffer, ROW({argType}), *pool_, &serde);
+
+      VELOX_CHECK_EQ(
+          inputVector->childrenSize(),
+          1,
+          "Expected exactly 1 column for function 'remote_strlen'.");
+
+      const auto numRows = inputVector->size();
+      auto resultVector = BaseVector::create(outType, numRows, pool_.get());
+
+      auto inputFlat = inputVector->childAt(0)->asFlatVector<StringView>();
+      auto outFlat = resultVector->asFlatVector<StringView>();
+
+      for (vector_size_t i = 0; i < numRows; ++i) {
+        if (inputFlat->isNullAt(i)) {
+          outFlat->setNull(i, true);
+        } else {
+          std::string result = inputFlat->valueAt(i).str();
+          result.erase(
+              std::remove_if(result.begin(), result.end(), ::isspace),
+              result.end());
+          outFlat->set(i, result.data());
+        }
+      }
+
+      auto outputRowVector = std::make_shared<RowVector>(
+          pool_.get(),
+          ROW({outType}),
+          BufferPtr(),
+          numRows,
+          std::vector<VectorPtr>{resultVector});
+
+      auto payload = rowVectorToIOBuf(
+          outputRowVector, outputRowVector->size(), *pool_, &serde);
+
+      res_.result(boost::beast::http::status::ok);
+      res_.set(
+          boost::beast::http::field::content_type,
+          "application/X-presto-pages");
+      res_.body() = payload.moveToFbString().toStdString();
+      res_.prepare_payload();
+      auto self = shared_from_this();
+      boost::beast::http::async_write(
+          socket_,
+          res_,
+          [self](boost::beast::error_code ec, std::size_t bytes_transferred) {
+            self->onWrite(false, ec, bytes_transferred);
+          });
+
+    } else {
+      // Function name doesn't match any known function
       VELOX_USER_FAIL(
           "Function '{}' is not available on the server.", functionName);
     }
 
-    // We assume a single argument of type INTEGER and a single return type of
-    // INTEGER. If you have these from some request headers, you can parse them;
-    // otherwise, if you know them upfront, you can hard-code them:
-    std::vector<std::string> argTypeNames = {"integer"};
-    std::string returnTypeName = "integer";
-
-    serializer::presto::PrestoVectorSerde serde;
-    auto inputBuffer = folly::IOBuf::copyBuffer(req.body());
-
-    // Parse the input argument type and output type (both should be INTEGER
-    // here).
-    auto argType = type::fbhive::HiveTypeParser().parse(argTypeNames[0]);
-    auto outType = type::fbhive::HiveTypeParser().parse(returnTypeName);
-
-    VELOX_CHECK_EQ(
-        argType->kind(),
-        outType->kind(),
-        "For this simple 'abs' function, argument type and return type should match.");
-
-    // Build the row type with a single child of type argType.
-    auto rowType = ROW({argType});
-    auto inputVector = IOBufToRowVector(*inputBuffer, rowType, *pool_, &serde);
-
-    VELOX_CHECK_EQ(
-        inputVector->childrenSize(),
-        1,
-        "Expected exactly 1 column for function '{}'.",
-        functionName);
-
-    // Create the result vector.
-    const auto numRows = inputVector->size();
-    auto resultVector = BaseVector::create(argType, numRows, pool_.get());
-
-    // Compute abs for INTEGER.
-    auto inputFlat = inputVector->childAt(0)->asFlatVector<int32_t>();
-    auto outFlat = resultVector->asFlatVector<int32_t>();
-    for (vector_size_t i = 0; i < numRows; ++i) {
-      if (inputFlat->isNullAt(i)) {
-        outFlat->setNull(i, true);
-      } else {
-        int32_t val = inputFlat->valueAt(i);
-        outFlat->set(i, std::abs(val));
-      }
-    }
-
-    // Wrap in a RowVector for serialization.
-    auto outputRowVector = std::make_shared<RowVector>(
-        pool_.get(),
-        rowType,
-        BufferPtr(),
-        numRows,
-        std::vector<VectorPtr>{resultVector});
-
-    // Serialize the result back to an IOBuf.
-    auto payload = rowVectorToIOBuf(
-        outputRowVector, outputRowVector->size(), *pool_, &serde);
-
-    // Construct a successful response.
-    res_.result(boost::beast::http::status::ok);
-    res_.set(
-        boost::beast::http::field::content_type, "application/octet-stream");
-    res_.body() = payload.moveToFbString().toStdString();
-    res_.prepare_payload();
-
-    auto self = shared_from_this();
-    boost::beast::http::async_write(
-        socket_,
-        res_,
-        [self](boost::beast::error_code ec, std::size_t bytes_transferred) {
-          self->onWrite(false, ec, bytes_transferred);
-        });
-
   } catch (const std::exception& ex) {
-    // Handle any errors that occurred in the above logic.
     LOG(ERROR) << ex.what();
     res_.result(boost::beast::http::status::internal_server_error);
     res_.set(boost::beast::http::field::content_type, "text/plain");
     res_.body() = ex.what();
     res_.prepare_payload();
-
     auto self = shared_from_this();
     boost::beast::http::async_write(
         socket_,
