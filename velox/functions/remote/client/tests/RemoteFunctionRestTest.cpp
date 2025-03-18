@@ -39,40 +39,46 @@ class RemoteFunctionRestTest
       public testing::WithParamInterface<remote::PageFormat> {
  public:
   void SetUp() override {
-    auto servicePort = facebook::velox::exec::test::getFreePort();
+    auto servicePort = exec::test::getFreePort();
     location_ = fmt::format("http://127.0.0.1:{}", servicePort);
-    auto wrongServicePort = facebook::velox::exec::test::getFreePort();
+    auto wrongServicePort = exec::test::getFreePort();
     wrongLocation_ = fmt::format("http://127.0.0.1:{}", wrongServicePort);
 
     initializeServer(servicePort);
     registerRemoteFunctions();
   }
 
-  static void registerFunctionHelper(
-      const std::string& functionName,
-      const std::vector<exec::FunctionSignaturePtr>& signatures,
-      const std::string& baseLocation) {
-    RemoteVectorFunctionMetadata metadata;
-    metadata.serdeFormat = remote::PageFormat::PRESTO_PAGE;
-    metadata.location = baseLocation + '/' + functionName;
-    registerRemoteFunction(functionName, signatures, metadata);
+  ~RemoteFunctionRestTest() override {
+    if (serverThread_ && serverThread_->joinable()) {
+      ioc_.stop();
+      serverThread_->join();
+    }
   }
 
+ private:
   // Registers a few remote functions to be used in this test.
   void registerRemoteFunctions() const {
     auto absSignature = {exec::FunctionSignatureBuilder()
                              .returnType("integer")
                              .argumentType("integer")
                              .build()};
-
     auto roundSignature = {exec::FunctionSignatureBuilder()
                                .returnType("integer")
                                .argumentType("integer")
                                .build()};
 
-    registerFunctionHelper("remote_abs", absSignature, location_);
-    registerFunctionHelper("remote_round", roundSignature, location_);
-    registerFunctionHelper("remote_wrong_port", absSignature, wrongLocation_);
+    auto registerFunction =
+        [&](const std::string& functionName,
+            const std::vector<exec::FunctionSignaturePtr>& signatures,
+            const std::string& baseLocation) {
+          RemoteVectorFunctionMetadata metadata;
+          metadata.location = baseLocation + '/' + functionName;
+          registerRemoteFunction(functionName, signatures, metadata);
+        };
+
+    registerFunction("remote_abs", absSignature, location_);
+    registerFunction("remote_round", roundSignature, location_);
+    registerFunction("remote_wrong_port", absSignature, wrongLocation_);
   }
 
   void initializeServer(uint16_t servicePort) {
@@ -97,14 +103,6 @@ class RemoteFunctionRestTest
         waitForRunning(servicePort), "Unable to initialize HTTP server.");
   }
 
-  ~RemoteFunctionRestTest() override {
-    if (serverThread_ && serverThread_->joinable()) {
-      ioc_.stop();
-      serverThread_->join();
-    }
-  }
-
- private:
   bool waitForRunning(uint16_t servicePort) const {
     for (size_t i = 0; i < 100; ++i) {
       using boost::asio::ip::tcp;
