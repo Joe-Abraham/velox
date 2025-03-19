@@ -81,6 +81,7 @@ class RemoteFunctionRestTest
             const std::vector<exec::FunctionSignaturePtr>& signatures,
             const std::string& baseLocation) {
           RemoteVectorFunctionMetadata metadata;
+          metadata.serdeFormat = GetParam();
           metadata.location = baseLocation + '/' + functionName;
           registerRemoteFunction(functionName, signatures, metadata);
         };
@@ -143,7 +144,7 @@ class RemoteFunctionRestTest
   const std::string remotePrefix_{"remote"};
 };
 
-TEST_F(RemoteFunctionRestTest, absolute) {
+TEST_P(RemoteFunctionRestTest, absolute) {
   auto inputVector = makeFlatVector<int32_t>({-10, -20});
   auto results = evaluate<SimpleVector<int32_t>>(
       "remote_abs(c0)", makeRowVector({inputVector}));
@@ -152,7 +153,7 @@ TEST_F(RemoteFunctionRestTest, absolute) {
   assertEqualVectors(expected, results);
 }
 
-TEST_F(RemoteFunctionRestTest, stringLength) {
+TEST_P(RemoteFunctionRestTest, stringLength) {
   auto inputVector =
       makeFlatVector<StringView>({"hello", "from", "remote", "server"});
   auto results = evaluate<SimpleVector<int32_t>>(
@@ -162,7 +163,7 @@ TEST_F(RemoteFunctionRestTest, stringLength) {
   assertEqualVectors(expected, results);
 }
 
-TEST_F(RemoteFunctionRestTest, trimWhitespace) {
+TEST_P(RemoteFunctionRestTest, trimWhitespace) {
   auto inputVector = makeFlatVector<StringView>(
       {"hello from remote server", "testing remote server"});
   auto results = evaluate<SimpleVector<StringView>>(
@@ -173,7 +174,7 @@ TEST_F(RemoteFunctionRestTest, trimWhitespace) {
   assertEqualVectors(expected, results);
 }
 
-TEST_F(RemoteFunctionRestTest, tryException) {
+TEST_P(RemoteFunctionRestTest, tryException) {
   // remote_divide throws if denominator is 0.
   auto numeratorVector = makeFlatVector<double>({0, 1, 4, 9, 16, 25, -25});
   auto denominatorVector = makeFlatVector<double>({0, 1, 2, 3, 4, 0, 2});
@@ -188,7 +189,7 @@ TEST_F(RemoteFunctionRestTest, tryException) {
   assertEqualVectors(expected, results);
 }
 
-TEST_F(RemoteFunctionRestTest, functionNotAvailable) {
+TEST_P(RemoteFunctionRestTest, functionNotAvailable) {
   auto inputVector = makeFlatVector<int32_t>({-10, -20});
   VELOX_ASSERT_THROW(
       evaluate<SimpleVector<int32_t>>(
@@ -196,13 +197,20 @@ TEST_F(RemoteFunctionRestTest, functionNotAvailable) {
       "Function 'remote_round' is not available on the server.");
 }
 
-TEST_F(RemoteFunctionRestTest, connectionError) {
+TEST_P(RemoteFunctionRestTest, connectionError) {
   auto inputVector = makeFlatVector<int32_t>({-10, -20});
   VELOX_ASSERT_THROW(
       evaluate<SimpleVector<int32_t>>(
           "remote_wrong_port(c0)", makeRowVector({inputVector})),
       "Error communicating with server: ");
 }
+
+VELOX_INSTANTIATE_TEST_SUITE_P(
+    RemoteFunctionRestTestFixture,
+    RemoteFunctionRestTest,
+    ::testing::Values(
+        remote::PageFormat::PRESTO_PAGE,
+        remote::PageFormat::SPARK_UNSAFE_ROW));
 
 } // namespace
 } // namespace facebook::velox::functions

@@ -18,6 +18,7 @@
 
 #include <boost/beast/version.hpp>
 #include "velox/serializers/PrestoSerializer.h"
+#include "velox/serializers/UnsafeRowSerializer.h"
 #include "velox/type/fbhive/HiveTypeParser.h"
 #include "velox/vector/FlatVector.h"
 #include "velox/vector/VectorStream.h"
@@ -89,11 +90,12 @@ void RestSession::handleRequest(
 
   auto contentTypeHeader = req[boost::beast::http::field::content_type];
   if (contentTypeHeader.empty() ||
-      contentTypeHeader != "application/X-presto-pages") {
+      !(contentTypeHeader == "application/X-presto-pages" ||
+        contentTypeHeader == "application/X-spark-unsafe-row")) {
     res_.result(boost::beast::http::status::unsupported_media_type);
     res_.set(boost::beast::http::field::content_type, "text/plain");
     res_.body() = fmt::format(
-        "Unsupported Content-Type: '{}'. Expecting 'application/X-presto-pages'.",
+        "Unsupported Content-Type: '{}'. Expecting 'application/X-presto-pages' or 'application/X-spark-unsafe-row'.",
         std::string(contentTypeHeader));
 
     res_.prepare_payload();
@@ -109,11 +111,13 @@ void RestSession::handleRequest(
   }
 
   auto acceptHeader = req[boost::beast::http::field::accept];
-  if (acceptHeader.empty() || acceptHeader != "application/X-presto-pages") {
+  if (acceptHeader.empty() ||
+      !(acceptHeader == "application/X-presto-pages" ||
+        acceptHeader == "application/X-spark-unsafe-row")) {
     res_.result(boost::beast::http::status::not_acceptable);
     res_.set(boost::beast::http::field::content_type, "text/plain");
     res_.body() = fmt::format(
-        "Unsupported Accept header: '{}'. Expecting 'application/X-presto-pages'.",
+        "Unsupported Accept header: '{}'. Expecting 'application/X-presto-pages' or 'application/X-spark-unsafe-row'.",
         std::string(acceptHeader));
     res_.prepare_payload();
 
@@ -151,7 +155,13 @@ void RestSession::handleRequest(
   }
 
   try {
-    serializer::presto::PrestoVectorSerde serde;
+    std::unique_ptr<VectorSerde> serde;
+    if (contentTypeHeader == "application/X-presto-pages") {
+      serde = std::make_unique<serializer::presto::PrestoVectorSerde>();
+    } else {
+      serde = std::make_unique<serializer::spark::UnsafeRowVectorSerde>();
+    }
+
     auto inputBuffer = folly::IOBuf::copyBuffer(req.body());
 
     if (functionName == "remote_abs") {
@@ -162,7 +172,7 @@ void RestSession::handleRequest(
       auto outType = type::fbhive::HiveTypeParser().parse(returnTypeName);
 
       auto inputVector =
-          IOBufToRowVector(*inputBuffer, ROW({argType}), *pool_, &serde);
+          IOBufToRowVector(*inputBuffer, ROW({argType}), *pool_, serde.get());
       VELOX_CHECK_EQ(
           inputVector->childrenSize(),
           1,
@@ -190,7 +200,7 @@ void RestSession::handleRequest(
           std::vector<VectorPtr>{resultVector});
 
       auto payload = rowVectorToIOBuf(
-          outputRowVector, outputRowVector->size(), *pool_, &serde);
+          outputRowVector, outputRowVector->size(), *pool_, serde.get());
 
       res_.result(boost::beast::http::status::ok);
       res_.set(
@@ -214,7 +224,7 @@ void RestSession::handleRequest(
       auto outType = type::fbhive::HiveTypeParser().parse(returnTypeName);
 
       auto inputVector =
-          IOBufToRowVector(*inputBuffer, ROW({argType}), *pool_, &serde);
+          IOBufToRowVector(*inputBuffer, ROW({argType}), *pool_, serde.get());
 
       VELOX_CHECK_EQ(
           inputVector->childrenSize(),
@@ -244,7 +254,7 @@ void RestSession::handleRequest(
           std::vector<VectorPtr>{resultVector});
 
       auto payload = rowVectorToIOBuf(
-          outputRowVector, outputRowVector->size(), *pool_, &serde);
+          outputRowVector, outputRowVector->size(), *pool_, serde.get());
 
       res_.result(boost::beast::http::status::ok);
       res_.set(
@@ -268,7 +278,7 @@ void RestSession::handleRequest(
       auto outType = type::fbhive::HiveTypeParser().parse(returnTypeName);
 
       auto inputVector =
-          IOBufToRowVector(*inputBuffer, ROW({argType}), *pool_, &serde);
+          IOBufToRowVector(*inputBuffer, ROW({argType}), *pool_, serde.get());
 
       VELOX_CHECK_EQ(
           inputVector->childrenSize(),
@@ -301,7 +311,7 @@ void RestSession::handleRequest(
           std::vector<VectorPtr>{resultVector});
 
       auto payload = rowVectorToIOBuf(
-          outputRowVector, outputRowVector->size(), *pool_, &serde);
+          outputRowVector, outputRowVector->size(), *pool_, serde.get());
 
       res_.result(boost::beast::http::status::ok);
       res_.set(
@@ -327,7 +337,7 @@ void RestSession::handleRequest(
 
       auto rowType = ROW({numType, denType});
       auto inputVector =
-          IOBufToRowVector(*inputBuffer, rowType, *pool_, &serde);
+          IOBufToRowVector(*inputBuffer, rowType, *pool_, serde.get());
 
       VELOX_CHECK_EQ(
           inputVector->childrenSize(),
@@ -366,7 +376,7 @@ void RestSession::handleRequest(
           std::vector<VectorPtr>{resultVector});
 
       auto payload = rowVectorToIOBuf(
-          outputRowVector, outputRowVector->size(), *pool_, &serde);
+          outputRowVector, outputRowVector->size(), *pool_, serde.get());
 
       res_.result(boost::beast::http::status::ok);
       res_.set(
