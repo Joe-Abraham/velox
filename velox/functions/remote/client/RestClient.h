@@ -22,7 +22,6 @@
 #include "velox/functions/remote/if/gen-cpp2/RemoteFunction_types.h"
 
 namespace facebook::velox::functions {
-.
 /// This class uses an HTTP client library - cpr to:
 ///  - Send a POST request to the specified @p url.
 ///  - Attach serialization format information as HTTP headers based on
