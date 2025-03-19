@@ -20,6 +20,7 @@
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
 #include "velox/common/memory/Memory.h"
+#include "velox/vector/VectorStream.h"
 
 namespace facebook::velox::functions {
 
@@ -28,7 +29,7 @@ namespace facebook::velox::functions {
 /// This class re-hosts Velox functions and allows testing their functionality.
 class RestSession : public std::enable_shared_from_this<RestSession> {
  public:
-  RestSession(boost::asio::ip::tcp::socket socket, std::string functionPrefix);
+  RestSession(boost::asio::ip::tcp::socket socket);
 
   /// Starts the session by initiating a read operation.
   void run();
@@ -53,11 +54,58 @@ class RestSession : public std::enable_shared_from_this<RestSession> {
   // Closes the socket connection.
   void doClose();
 
+  // Helper to handle exceptions: logs error and sends HTTP 500
+  void handleException(const std::exception& ex);
+
+  // Helper to extract function name from /{functionName}
+  bool extractFunctionName(
+      const boost::beast::http::request<boost::beast::http::string_body>& req,
+      std::string& outFunctionName);
+
+  // Sends a response with status, contentType, and body. Then calls
+  // async_write.
+  void sendResponse(
+      boost::beast::http::status status,
+      const std::string& contentType,
+      const std::string& body,
+      bool closeConnection);
+
+  // Helper to ensure the HTTP method is POST, else sends an error response.
+  bool ensurePostMethod(
+      const boost::beast::http::request<boost::beast::http::string_body>& req);
+
+  // Helper to ensure Content-Type is either "application/X-presto-pages" or
+  // "application/X-spark-unsafe-row". Otherwise sends an error response.
+  bool ensureValidContentType(
+      const boost::beast::http::request<boost::beast::http::string_body>& req);
+
+  // Helper to ensure Accept is either "application/X-presto-pages" or
+  // "application/X-spark-unsafe-row". Otherwise sends an error response.
+  bool ensureValidAccept(
+      const boost::beast::http::request<boost::beast::http::string_body>& req);
+
+  // Sends a success response with the given payload.
+  void sendSuccessResponse(folly::IOBuf&& payload);
+
+  void handleRemoteAbs(
+      std::unique_ptr<folly::IOBuf> inputBuffer,
+      VectorSerde* serde);
+  void handleRemoteStrlen(
+      std::unique_ptr<folly::IOBuf> inputBuffer,
+      VectorSerde* serde);
+  void handleRemoteTrim(
+      std::unique_ptr<folly::IOBuf> inputBuffer,
+      VectorSerde* serde);
+  void handleRemoteDivide(
+      std::unique_ptr<folly::IOBuf> inputBuffer,
+      VectorSerde* serde);
+
   boost::asio::ip::tcp::socket socket_;
   boost::beast::flat_buffer buffer_;
   boost::beast::http::request<boost::beast::http::string_body> req_;
   boost::beast::http::response<boost::beast::http::string_body> res_;
   std::shared_ptr<memory::MemoryPool> pool_;
+  std::string contentType_;
 };
 
 /// @brief Listens for incoming TCP connections and creates sessions.
@@ -67,8 +115,7 @@ class RestListener : public std::enable_shared_from_this<RestListener> {
  public:
   RestListener(
       boost::asio::io_context& ioc,
-      boost::asio::ip::tcp::endpoint endpoint,
-      std::string functionPrefix);
+      boost::asio::ip::tcp::endpoint endpoint);
 
   /// Starts accepting incoming connections.
   void run();
@@ -84,7 +131,6 @@ class RestListener : public std::enable_shared_from_this<RestListener> {
 
   boost::asio::io_context& ioc_;
   boost::asio::ip::tcp::acceptor acceptor_;
-  std::string functionPrefix_;
 };
 
 } // namespace facebook::velox::functions

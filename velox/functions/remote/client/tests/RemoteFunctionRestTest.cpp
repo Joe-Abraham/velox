@@ -56,7 +56,7 @@ class RemoteFunctionRestTest
   }
 
  private:
-  // Registers a few remote functions to be used in this test.
+  // Registers a remote functions to be used in this test.
   void registerRemoteFunctions() const {
     auto absSignature = {exec::FunctionSignatureBuilder()
                              .returnType("integer")
@@ -101,12 +101,10 @@ class RemoteFunctionRestTest
     // Start the server in a separate thread
     serverThread_ = std::make_unique<std::thread>([this, servicePort]() {
       std::string serviceHost = "127.0.0.1";
-      std::string functionPrefix = remotePrefix_;
       std::make_shared<RestListener>(
           ioc_,
           boost::asio::ip::tcp::endpoint(
-              boost::asio::ip::make_address(serviceHost), servicePort),
-          functionPrefix)
+              boost::asio::ip::make_address(serviceHost), servicePort))
           ->run();
 
       ioc_.run();
@@ -140,8 +138,6 @@ class RemoteFunctionRestTest
 
   std::string location_;
   std::string wrongLocation_;
-
-  const std::string remotePrefix_{"remote"};
 };
 
 TEST_P(RemoteFunctionRestTest, absolute) {
