@@ -6,7 +6,15 @@ Overview
 --------
 This document provides an overview of how to register and use REST-based remote functions
 in Velox. REST-based remote functions are external functions that Velox can call via an HTTP
-endpoint, where function execution is offloaded to a remote service. 
+endpoint, where function execution is offloaded to a remote service.
+
+Using REST-based remote functions in Velox involves two major steps:
+
+1. **Registration**: Provide the remote server's endpoint and other metadata via
+   ``registerRemoteFunction()`` so that Velox knows how to connect and what format to use.
+2. **Execution**: During query execution, Velox serializes function inputs, sends them
+   to the remote server, and deserializes the results in the ``serdeFormat`` provided at the time
+   of function registration.
 
 Registration
 ------------
@@ -16,16 +24,16 @@ and register the remote function. Below is an example of registering an absolute
 
 .. code-block:: c++
 
-    auto absSignature = {exec::FunctionSignatureBuilder()
+    auto absSignature = exec::FunctionSignatureBuilder()
                              .returnType("integer")
                              .argumentType("integer")
-                             .build()};
+                             .build();
 
     RemoteVectorFunctionMetadata metadata;
     metadata.serdeFormat = remote::PageFormat::PRESTO_PAGE;
     metadata.location = restServerUrl + '/' + "remote_abs";
 
-    registerRemoteFunction("remote_abs", signatures, metadata);
+    registerRemoteFunction("remote_abs", {absSignature}, metadata);
 
 .. note::
 
@@ -55,13 +63,3 @@ hints or metadata.
 
 .. note::
    - Serialization - Deserialization information is passed as headers in the HTTP request.
-
-Summary
--------
-Using REST-based remote functions in Velox involves two major steps:
-
-1. **Registration**: Provide the remote server's endpoint and other metadata via
-   ``registerRemoteFunction()`` so that Velox knows how to connect and what format to use.
-2. **Execution**: During query execution, Velox serializes function inputs, sends them
-   to the remote server, and deserializes the results in the ``serdeFormat`` provided at the time
-   of function registration.
