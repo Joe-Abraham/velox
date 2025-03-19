@@ -62,10 +62,6 @@ class RemoteFunctionRestTest
                              .returnType("integer")
                              .argumentType("integer")
                              .build()};
-    auto roundSignature = {exec::FunctionSignatureBuilder()
-                               .returnType("integer")
-                               .argumentType("integer")
-                               .build()};
     auto strLenSignature = {exec::FunctionSignatureBuilder()
                                 .returnType("integer")
                                 .argumentType("varchar")
@@ -74,6 +70,11 @@ class RemoteFunctionRestTest
                                  .returnType("varchar")
                                  .argumentType("varchar")
                                  .build()};
+    auto divSignatures = {exec::FunctionSignatureBuilder()
+                              .returnType("double")
+                              .argumentType("double")
+                              .argumentType("double")
+                              .build()};
 
     auto registerFunction =
         [&](const std::string& functionName,
@@ -87,7 +88,8 @@ class RemoteFunctionRestTest
     registerFunction("remote_abs", absSignature, location_);
     registerFunction("remote_strlen", strLenSignature, location_);
     registerFunction("remote_trim", strTrimSignature, location_);
-    registerFunction("remote_round", roundSignature, location_);
+    registerFunction("remote_divide", divSignatures, location_);
+    registerFunction("remote_round", absSignature, location_);
     registerFunction("remote_wrong_port", absSignature, wrongLocation_);
   }
 
@@ -168,6 +170,21 @@ TEST_F(RemoteFunctionRestTest, trimWhitespace) {
 
   auto expected = makeFlatVector<StringView>(
       {"hellofromremoteserver", "testingremoteserver"});
+  assertEqualVectors(expected, results);
+}
+
+TEST_F(RemoteFunctionRestTest, tryException) {
+  // remote_divide throws if denominator is 0.
+  auto numeratorVector = makeFlatVector<double>({0, 1, 4, 9, 16, 25, -25});
+  auto denominatorVector = makeFlatVector<double>({0, 1, 2, 3, 4, 0, 2});
+  auto data = makeRowVector({numeratorVector, denominatorVector});
+  auto results = evaluate<SimpleVector<double>>("remote_divide(c0, c1)", data);
+
+  ASSERT_EQ(results->size(), 7);
+  auto expected = makeFlatVector<double>({0, 1, 2, 3, 4, 0, -12.5});
+  expected->setNull(0, true);
+  expected->setNull(5, true);
+
   assertEqualVectors(expected, results);
 }
 

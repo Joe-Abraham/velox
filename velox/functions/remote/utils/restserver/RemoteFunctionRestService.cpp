@@ -317,7 +317,74 @@ void RestSession::handleRequest(
             self->onWrite(false, ec, bytes_transferred);
           });
 
-    } else {
+    } else if (functionName == "remote_divide") {
+      std::vector<std::string> argTypeNames = {"double", "double"};
+      std::string returnTypeName = "double";
+
+      auto numType = type::fbhive::HiveTypeParser().parse(argTypeNames[0]);
+      auto denType = type::fbhive::HiveTypeParser().parse(argTypeNames[1]);
+      auto outType = type::fbhive::HiveTypeParser().parse(returnTypeName);
+
+      auto rowType = ROW({numType, denType});
+      auto inputVector =
+          IOBufToRowVector(*inputBuffer, rowType, *pool_, &serde);
+
+      VELOX_CHECK_EQ(
+          inputVector->childrenSize(),
+          2,
+          "Expected exactly 2 columns for function 'remote_divide'.");
+
+      const auto numRows = inputVector->size();
+
+      auto resultVector = BaseVector::create(outType, numRows, pool_.get());
+
+      auto inputFlat0 = inputVector->childAt(0)->asFlatVector<double>();
+      auto inputFlat1 = inputVector->childAt(1)->asFlatVector<double>();
+      auto outFlat = resultVector->asFlatVector<double>();
+
+      for (vector_size_t i = 0; i < numRows; ++i) {
+        if (inputFlat0->isNullAt(i) || inputFlat1->isNullAt(i)) {
+          // If either operand is null, result is null
+          outFlat->setNull(i, true);
+        } else {
+          double dividend = inputFlat0->valueAt(i);
+          double divisor = inputFlat1->valueAt(i);
+
+          if (divisor == 0.0) {
+            outFlat->setNull(i, true);
+          } else {
+            outFlat->set(i, dividend / divisor);
+          }
+        }
+      }
+
+      auto outputRowVector = std::make_shared<RowVector>(
+          pool_.get(),
+          ROW({outType}),
+          BufferPtr(),
+          numRows,
+          std::vector<VectorPtr>{resultVector});
+
+      auto payload = rowVectorToIOBuf(
+          outputRowVector, outputRowVector->size(), *pool_, &serde);
+
+      res_.result(boost::beast::http::status::ok);
+      res_.set(
+          boost::beast::http::field::content_type,
+          "application/X-presto-pages");
+      res_.body() = payload.moveToFbString().toStdString();
+      res_.prepare_payload();
+
+      auto self = shared_from_this();
+      boost::beast::http::async_write(
+          socket_,
+          res_,
+          [self](boost::beast::error_code ec, std::size_t bytes_transferred) {
+            self->onWrite(false, ec, bytes_transferred);
+          });
+    }
+
+    else {
       // Function name doesn't match any known function
       VELOX_USER_FAIL(
           "Function '{}' is not available on the server.", functionName);
