@@ -17,6 +17,7 @@
 #include "velox/functions/remote/utils/restserver/RemoteFunctionRestService.h"
 
 #include <boost/beast/version.hpp>
+
 #include "velox/serializers/PrestoSerializer.h"
 #include "velox/serializers/UnsafeRowSerializer.h"
 #include "velox/type/fbhive/HiveTypeParser.h"

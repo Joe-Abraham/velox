@@ -19,6 +19,7 @@
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+
 #include "velox/common/memory/Memory.h"
 #include "velox/vector/VectorStream.h"
 

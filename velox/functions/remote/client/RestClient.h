@@ -17,7 +17,6 @@
 #pragma once
 
 #include <folly/io/IOBuf.h>
-#include <memory>
 #include <string>
 
 #include "velox/functions/remote/if/gen-cpp2/RemoteFunction_types.h"

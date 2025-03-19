@@ -23,6 +23,13 @@
 
 using namespace folly;
 namespace facebook::velox::functions {
+namespace {
+inline std::string getContentType(remote::PageFormat serdeFormat) {
+  return serdeFormat == remote::PageFormat::SPARK_UNSAFE_ROW
+      ? "application/X-spark-unsafe-row"
+      : "application/X-presto-pages";
+}
+} // namespace
 
 std::unique_ptr<IOBuf> RestClient::invokeFunction(
     const std::string& fullUrl,
@@ -37,16 +44,7 @@ std::unique_ptr<IOBuf> RestClient::invokeFunction(
         reinterpret_cast<const char*>(range.data()), range.size());
   }
 
-  std::string contentType;
-  switch (serdeFormat) {
-    case remote::PageFormat::SPARK_UNSAFE_ROW:
-      contentType = "application/X-spark-unsafe-row";
-      break;
-    case remote::PageFormat::PRESTO_PAGE:
-    default:
-      contentType = "application/X-presto-pages";
-      break;
-  }
+  std::string contentType = getContentType(serdeFormat);
 
   cpr::Response response = Post(
       cpr::Url{fullUrl},
