@@ -32,21 +32,6 @@ struct RemoteVectorFunctionMetadata : public exec::VectorFunctionMetadata {
 
   /// The serialization format to be used when sending data to the remote.
   remote::PageFormat serdeFormat{remote::PageFormat::PRESTO_PAGE};
-
-  /// Optional schema defining the structure of the data or input/output types
-  /// involved in the remote function. This may include details such as column
-  /// names and data types.
-  std::optional<std::string> schema;
-
-  /// Optional identifier for the specific remote function to be invoked.
-  /// This can be useful when the same server hosts multiple functions,
-  /// and the client needs to specify which function to call.
-  std::optional<std::string> functionId;
-
-  /// Optional version information to be used when calling the remote function.
-  /// This can help in ensuring compatibility with a particular version of the
-  /// function if multiple versions are available on the server.
-  std::optional<std::string> version;
 };
 
 /// Registers a new remote function. It will use the meatadata defined in
