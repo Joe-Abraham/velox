@@ -48,7 +48,7 @@ std::unique_ptr<IOBuf> RestClient::invokeFunction(
       break;
   }
 
-  cpr::Response response = cpr::Post(
+  cpr::Response response = Post(
       cpr::Url{fullUrl},
       cpr::Header{{"Content-Type", contentType}, {"Accept", contentType}},
       cpr::Body{requestBody});
@@ -72,7 +72,7 @@ std::unique_ptr<IOBuf> RestClient::invokeFunction(
   return outputBuf;
 }
 
-std::unique_ptr<HttpClient> getRestClient() {
+std::unique_ptr<RestClient> getRestClient() {
   return std::make_unique<RestClient>();
 }
 

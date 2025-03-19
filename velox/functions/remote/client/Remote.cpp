@@ -208,7 +208,7 @@ class RemoteFunction : public exec::VectorFunction {
 
   // Depending on the location, one of these is initialized by the visitor.
   std::unique_ptr<RemoteFunctionClient> thriftClient_{nullptr};
-  std::unique_ptr<HttpClient> restClient_{nullptr};
+  std::unique_ptr<RestClient> restClient_{nullptr};
 
   remote::PageFormat serdeFormat_;
   std::unique_ptr<VectorSerde> serde_;

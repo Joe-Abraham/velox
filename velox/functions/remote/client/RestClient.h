@@ -23,34 +23,13 @@
 #include "velox/functions/remote/if/gen-cpp2/RemoteFunction_types.h"
 
 namespace facebook::velox::functions {
-
-/// @brief Abstract interface for an HTTP client.
-/// Provides a method to invoke a function by sending an HTTP request
-/// and receiving a response.
-class HttpClient {
- public:
-  virtual ~HttpClient() = default;
-
-  /// @brief Invokes a remote function via HTTP.
-  /// @param url The target endpoint to which the request should be sent.
-  /// @param requestPayload A pointer to the serialized request body.
-  /// @param serdeFormat Specifies the serialization/deserialization format,
-  ///        which is also passed as an HTTP header.
-  ///
-  /// @return A unique_ptr to a folly::IOBuf containing the serialized response.
-  virtual std::unique_ptr<folly::IOBuf> invokeFunction(
-      const std::string& url,
-      std::unique_ptr<folly::IOBuf> requestPayload,
-      remote::PageFormat serdeFormat) = 0;
-};
-
-/// @brief A concrete HttpClient implementation using a RESTful approach.
-/// This class uses an HTTP client library (e.g., cpr) to:
+.
+/// This class uses an HTTP client library - cpr to:
 ///  - Send a POST request to the specified @p url.
 ///  - Attach serialization format information as HTTP headers based on
 ///    @p serdeFormat (e.g. `Content-Type: application/presto+<format>`).
 ///  - Return the response payload as a folly::IOBuf.
-class RestClient : public HttpClient {
+class RestClient {
  public:
   /// @brief Invokes a function using an HTTP POST request.
   /// Constructs and sends an HTTP POST request to the provided @p url with
@@ -73,11 +52,11 @@ class RestClient : public HttpClient {
   std::unique_ptr<folly::IOBuf> invokeFunction(
       const std::string& url,
       std::unique_ptr<folly::IOBuf> requestPayload,
-      remote::PageFormat serdeFormat) override;
+      remote::PageFormat serdeFormat);
 };
 
 /// @brief Factory function to create an instance of RestClient.
 /// @return A unique pointer to an HttpClient implementation.
-std::unique_ptr<HttpClient> getRestClient();
+std::unique_ptr<RestClient> getRestClient();
 
 } // namespace facebook::velox::functions
