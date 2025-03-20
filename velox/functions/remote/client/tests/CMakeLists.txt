@@ -20,9 +20,7 @@ add_test(velox_functions_remote_client_thrift_test
 
 target_link_libraries(
   velox_functions_remote_client_thrift_test
-  remote_function_thrift
-  velox_functions_remote_thrift_server
-  velox_functions_remote
+  velox_remote_thrift_libs
   velox_function_registry
   velox_functions_test_lib
   velox_exec_test_lib

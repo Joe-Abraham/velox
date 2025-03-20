@@ -20,7 +20,6 @@
 #include <string>
 
 #include "velox/common/base/Exceptions.h"
-#include "velox/common/memory/ByteStream.h"
 #include "velox/expression/Expr.h"
 #include "velox/expression/VectorFunction.h"
 #include "velox/functions/remote/client/RestClient.h"
