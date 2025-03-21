@@ -48,9 +48,9 @@ class Base64 {
   static std::string encode(const folly::IOBuf* inputBuffer);
 
   /// Encodes the specified number of characters from the 'input' and writes the
-  /// result to the 'outputBuffer'. The output must have enough space as
+  /// result to the 'output'. The output must have enough space as
   /// returned by the calculateEncodedSize().
-  static void encode(std::string_view input, std::string& outputBuffer);
+  static void encode(std::string_view input, std::string& output);
 
   /// Encodes the specified number of characters from the 'input' using URL
   /// encoding.
@@ -74,17 +74,13 @@ class Base64 {
       std::string& output);
 
   /// Decodes the specified number of characters from the 'input' and writes the
-  /// result to the 'outputBuffer'. The output must have enough space as
+  /// result to the 'output'. The output must have enough space as
   /// returned by the calculateDecodedSize().
-  static void decode(const char* input, size_t inputSize, char* outputBuffer);
+  // static void decode(std::string_view input, std::string& output);
 
   /// Decodes the specified number of characters from the 'input' and writes the
-  /// result to the 'outputBuffer'.
-  static Status decode(
-      const char* input,
-      size_t inputSize,
-      char* outputBuffer,
-      size_t outputSize);
+  /// result to the 'output'.
+  static Status decode(std::string_view input, std::string& output);
 
   /// Decodes the input Base64 URL encoded string.
   static std::string decodeUrl(folly::StringPiece encodedText);
@@ -96,39 +92,33 @@ class Base64 {
       std::string& output);
 
   /// Decodes the specified number of characters from the 'input' using URL
-  /// encoding and writes the result to the 'outputBuffer'
-  static Status decodeUrl(
-      const char* input,
-      size_t inputSize,
-      char* outputBuffer,
-      size_t outputSize);
+  /// encoding and writes the result to the 'output'
+  static Status decodeUrl(std::string_view input, std::string output);
 
   /// Calculates the encoded size based on input 'inputSize'.
   static size_t calculateEncodedSize(size_t inputSize, bool withPadding = true);
 
   /// Calculates the decoded size based on encoded input and adjusts the input
   /// size for padding.
-  static Expected<size_t> calculateDecodedSize(
-      const char* input,
-      size_t& inputSize);
+  static Expected<size_t> calculateDecodedSize(std::string_view input);
 
  private:
   // Padding character used in encoding.
   static const char kPadding = '=';
 
   // Checks if the input Base64 string is padded.
-  static inline bool isPadded(const char* input, size_t inputSize) {
-    return (inputSize > 0 && input[inputSize - 1] == kPadding);
+  static inline bool isPadded(std::string_view input) {
+    return (!input.empty() && input.back() == kPadding);
   }
 
   // Counts the number of padding characters in encoded input.
-  static inline size_t numPadding(const char* input, size_t inputSize) {
-    size_t numPadding{0};
-    while (inputSize > 0 && input[inputSize - 1] == kPadding) {
-      numPadding++;
-      inputSize--;
-    }
-    return numPadding;
+  static inline size_t numPadding(std::string_view input) {
+      size_t numPadding{0};
+      while (!input.empty() && input.back() == kPadding) {
+          ++numPadding;
+          input.remove_suffix(1);
+      }
+      return numPadding;
   }
 
   // Reverse lookup helper function to get the original index of a Base64
@@ -152,10 +142,8 @@ class Base64 {
 
   // Decodes the specified data using the provided reverse lookup table.
   static Status decodeImpl(
-      const char* input,
-      size_t inputSize,
-      char* outputBuffer,
-      size_t outputSize,
+      std::string_view input,
+      std::string& output,
       const ReverseIndex& reverseIndex);
 
   VELOX_FRIEND_TEST(Base64Test, checksPadding);
