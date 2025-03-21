@@ -281,8 +281,11 @@ struct ToBase64Function {
   FOLLY_ALWAYS_INLINE void call(
       out_type<Varchar>& result,
       const arg_type<Varbinary>& input) {
-    result.resize(encoding::Base64::calculateEncodedSize(input.size()));
-    encoding::Base64::encode(input.data(), input.size(), result.data());
+    std::string_view inputView(input.data(), input.size());
+    std::string output;
+    encoding::Base64::encode(inputView, output);
+    result.resize(output.size());
+    std::memcpy(result.data(), output.data(), output.size());
   }
 };
 
@@ -330,8 +333,11 @@ struct ToBase64UrlFunction {
   FOLLY_ALWAYS_INLINE void call(
       out_type<Varchar>& result,
       const arg_type<Varbinary>& input) {
-    result.resize(encoding::Base64::calculateEncodedSize(input.size()));
-    encoding::Base64::encodeUrl(input.data(), input.size(), result.data());
+    std::string_view inputView(input.data(), input.size());
+    std::string output;
+    encoding::Base64::encodeUrl(inputView, output);
+    result.resize(output.size());
+    std::memcpy(result.data(), output.data(), output.size());
   }
 };
 

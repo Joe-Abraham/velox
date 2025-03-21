@@ -161,8 +161,8 @@ void TextWriter::writeCellValue(
       break;
     case TypeKind::VARBINARY: {
       auto data = decodedColumnVector->valueAt<StringView>(row);
-      dataStr =
-          std::optional(encoding::Base64::encode(data.data(), data.size()));
+      std::string_view dataView(data.data(), data.size());
+      dataStr = std::optional(encoding::Base64::encode(dataView));
       break;
     }
     // TODO Add support for complex types

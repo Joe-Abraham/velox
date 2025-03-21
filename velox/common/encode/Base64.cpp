@@ -163,10 +163,8 @@ std::string Base64::encodeImpl(
     const T& input,
     const Charset& charset,
     bool includePadding) {
-  size_t encodedSize = calculateEncodedSize(input.size(), includePadding);
   std::string encodedResult;
-  encodedResult.resize(encodedSize);
-  encodeImpl(input, charset, includePadding, encodedResult.data());
+  encodeImpl(input, charset, includePadding, encodedResult);
   return encodedResult;
 }
 
@@ -186,15 +184,13 @@ size_t Base64::calculateEncodedSize(size_t inputSize, bool withPadding) {
 }
 
 // static
-void Base64::encode(const char* input, size_t inputSize, char* output) {
-  encodeImpl(
-      folly::StringPiece(input, inputSize), kBase64Charset, true, output);
+void Base64::encode(std::string_view input, std::string& output) {
+  encodeImpl(input, kBase64Charset, true, output);
 }
 
 // static
-void Base64::encodeUrl(const char* input, size_t inputSize, char* output) {
-  encodeImpl(
-      folly::StringPiece(input, inputSize), kBase64UrlCharset, true, output);
+void Base64::encodeUrl(std::string_view input, std::string& output) {
+  encodeImpl(input, kBase64UrlCharset, true, output);
 }
 
 // static
@@ -203,13 +199,19 @@ void Base64::encodeImpl(
     const T& input,
     const Charset& charset,
     bool includePadding,
-    char* outputBuffer) {
+    std::string& output) {
   auto inputSize = input.size();
   if (inputSize == 0) {
+    output.clear();
     return;
   }
 
-  auto outputPointer = outputBuffer;
+  // Calculate the output size and resize the string beforehand
+  size_t outputSize = calculateEncodedSize(inputSize, includePadding);
+  output.resize(outputSize); // Resize the output string to the required size
+
+  // Use a pointer to write into the pre-allocated buffer
+  auto outputPointer = output.data();
   auto inputIterator = input.begin();
 
   // For each group of 3 bytes (24 bits) in the input, split that into
@@ -249,13 +251,8 @@ void Base64::encodeImpl(
 }
 
 // static
-std::string Base64::encode(folly::StringPiece text) {
-  return encodeImpl(text, kBase64Charset, true);
-}
-
-// static
-std::string Base64::encode(const char* input, size_t inputSize) {
-  return encode(folly::StringPiece(input, inputSize));
+std::string Base64::encode(std::string_view input) {
+  return encodeImpl(input, kBase64Charset, true);
 }
 
 namespace {
@@ -349,9 +346,11 @@ Expected<uint8_t> Base64::base64ReverseLookup(
     const ReverseIndex& reverseIndex) {
   auto reverseLookupValue = reverseIndex[static_cast<uint8_t>(encodedChar)];
   if (reverseLookupValue >= 0x40) {
-    return folly::makeUnexpected(Status::UserError(fmt::format(
-        "decode() - invalid input string: invalid character '{}'",
-        encodedChar)));
+    return folly::makeUnexpected(
+        Status::UserError(
+            fmt::format(
+                "decode() - invalid input string: invalid character '{}'",
+                encodedChar)));
   }
   return reverseLookupValue;
 }
@@ -380,8 +379,9 @@ Expected<size_t> Base64::calculateDecodedSize(
     // block size
     if (inputSize % kEncodedBlockByteSize != 0) {
       return folly::makeUnexpected(
-          Status::UserError("Base64::decode() - invalid input string: "
-                            "string length is not a multiple of 4."));
+          Status::UserError(
+              "Base64::decode() - invalid input string: "
+              "string length is not a multiple of 4."));
     }
 
     auto decodedSize =
@@ -403,9 +403,10 @@ Expected<size_t> Base64::calculateDecodedSize(
   // Adjust the needed size for extra bytes, if present
   if (extraBytes) {
     if (extraBytes == 1) {
-      return folly::makeUnexpected(Status::UserError(
-          "Base64::decode() - invalid input string: "
-          "string length cannot be 1 more than a multiple of 4."));
+      return folly::makeUnexpected(
+          Status::UserError(
+              "Base64::decode() - invalid input string: "
+              "string length cannot be 1 more than a multiple of 4."));
     }
     decodedSize += (extraBytes * kBinaryBlockByteSize) / kEncodedBlockByteSize;
   }
@@ -491,13 +492,8 @@ Status Base64::decodeImpl(
 }
 
 // static
-std::string Base64::encodeUrl(folly::StringPiece text) {
-  return encodeImpl(text, kBase64UrlCharset, false);
-}
-
-// static
-std::string Base64::encodeUrl(const char* input, size_t inputSize) {
-  return encodeUrl(folly::StringPiece(input, inputSize));
+std::string Base64::encodeUrl(std::string_view input) {
+  return encodeImpl(input, kBase64UrlCharset, false);
 }
 
 // static

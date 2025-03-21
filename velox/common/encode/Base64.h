@@ -42,10 +42,7 @@ class Base64 {
   using ReverseIndex = std::array<uint8_t, kReverseIndexSize>;
 
   /// Encodes the specified number of characters from the 'input'.
-  static std::string encode(const char* input, size_t inputSize);
-
-  /// Encodes the specified text.
-  static std::string encode(folly::StringPiece text);
+  static std::string encode(std::string_view input);
 
   /// Encodes the specified IOBuf data.
   static std::string encode(const folly::IOBuf* inputBuffer);
@@ -53,23 +50,19 @@ class Base64 {
   /// Encodes the specified number of characters from the 'input' and writes the
   /// result to the 'outputBuffer'. The output must have enough space as
   /// returned by the calculateEncodedSize().
-  static void encode(const char* input, size_t inputSize, char* outputBuffer);
+  static void encode(std::string_view input, std::string& outputBuffer);
 
   /// Encodes the specified number of characters from the 'input' using URL
   /// encoding.
-  static std::string encodeUrl(const char* input, size_t inputSize);
-
-  /// Encodes the specified text using URL encoding.
-  static std::string encodeUrl(folly::StringPiece text);
+  static std::string encodeUrl(std::string_view input);
 
   /// Encodes the specified IOBuf data using URL encoding.
   static std::string encodeUrl(const folly::IOBuf* inputBuffer);
 
   /// Encodes the specified number of characters from the 'input' and writes the
-  /// result to the 'outputBuffer' using URL encoding. The output must have
+  /// result to the 'output' using URL encoding. The output must have
   /// enough space as returned by the calculateEncodedSize().
-  static void
-  encodeUrl(const char* input, size_t inputSize, char* outputBuffer);
+  static void encodeUrl(std::string_view input, std::string& output);
 
   /// Decodes the input Base64 encoded string.
   static std::string decode(folly::StringPiece encodedText);
@@ -155,7 +148,7 @@ class Base64 {
       const T& input,
       const Charset& charset,
       bool includePadding,
-      char* outputBuffer);
+      std::string& output);
 
   // Decodes the specified data using the provided reverse lookup table.
   static Status decodeImpl(
