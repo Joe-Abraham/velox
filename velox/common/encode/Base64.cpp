@@ -305,9 +305,12 @@ std::string Base64::encode(const folly::IOBuf* inputBuffer) {
 }
 
 // static
-std::string Base64::decode(folly::StringPiece encodedText) {
+std::string Base64::decode(std::string_view input) {
   std::string decodedResult;
-  decode(std::make_pair(encodedText.data(), encodedText.size()), decodedResult);
+  auto status = decodeImpl(input, decodedResult, kBase64ReverseIndexTable);
+  if (!status.ok()) {
+    VELOX_USER_FAIL(status.message());
+  }
   return decodedResult;
 }
 
@@ -315,7 +318,6 @@ std::string Base64::decode(folly::StringPiece encodedText) {
 void Base64::decode(
     const std::pair<const char*, int32_t>& payload,
     std::string& decodedOutput) {
-  size_t inputSize = payload.second;
   auto decodedSize = calculateDecodedSize(payload.first);
   if (decodedSize.hasError()) {
     VELOX_USER_FAIL(decodedSize.error().message());
@@ -498,29 +500,30 @@ Status Base64::decodeUrl(std::string_view input, std::string output) {
 }
 
 // static
-std::string Base64::decodeUrl(folly::StringPiece encodedText) {
+std::string Base64::decodeUrl(std::string_view input) {
   std::string decodedOutput;
-  decodeUrl(
-      std::make_pair(encodedText.data(), encodedText.size()), decodedOutput);
+  auto status = decodeImpl(input, decodedOutput, kBase64UrlReverseIndexTable);
+  if (!status.ok()) {
+    VELOX_USER_FAIL(status.message());
+  }
   return decodedOutput;
 }
 
 // static
-void Base64::decodeUrl(
-    const std::pair<const char*, int32_t>& payload,
-    std::string& decodedOutput) {
-  size_t inputSize = payload.second;
-  std::string_view input(payload.first);
-  auto decodedSize = calculateDecodedSize(input);
-  if (decodedSize.hasError()) {
-    VELOX_USER_FAIL(decodedSize.error().message());
-  }
-
-  decodedOutput.resize(decodedSize.value());
-  Status status = decodeImpl(input, decodedOutput, kBase64UrlReverseIndexTable);
-  if (!status.ok()) {
-    VELOX_USER_FAIL(status.message());
-  }
-}
+// void Base64::decodeUrl(
+//     const std::pair<const char*, int32_t>& payload,
+//     std::string& decodedOutput) {
+//   std::string_view input(payload.first);
+//   auto decodedSize = calculateDecodedSize(input);
+//   if (decodedSize.hasError()) {
+//     VELOX_USER_FAIL(decodedSize.error().message());
+//   }
+//
+//   decodedOutput.resize(decodedSize.value());
+//   Status status = decodeImpl(input, decodedOutput, kBase64UrlReverseIndexTable);
+//   if (!status.ok()) {
+//     VELOX_USER_FAIL(status.message());
+//   }
+// }
 
 } // namespace facebook::velox::encoding

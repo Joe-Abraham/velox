@@ -65,7 +65,7 @@ class Base64 {
   static void encodeUrl(std::string_view input, std::string& output);
 
   /// Decodes the input Base64 encoded string.
-  static std::string decode(folly::StringPiece encodedText);
+  static std::string decode(std::string_view input);
 
   /// Decodes the specified encoded payload and writes the result to the
   /// 'output'.
@@ -83,13 +83,13 @@ class Base64 {
   static Status decode(std::string_view input, std::string& output);
 
   /// Decodes the input Base64 URL encoded string.
-  static std::string decodeUrl(folly::StringPiece encodedText);
+  static std::string decodeUrl(std::string_view input);
 
   /// Decodes the specified URL encoded payload and writes the result to the
   /// 'output'.
-  static void decodeUrl(
-      const std::pair<const char*, int32_t>& payload,
-      std::string& output);
+  // static void decodeUrl(
+  //     const std::pair<const char*, int32_t>& payload,
+  //     std::string& output);
 
   /// Decodes the specified number of characters from the 'input' using URL
   /// encoding and writes the result to the 'output'
