@@ -49,49 +49,52 @@ TEST_F(Base64Test, fromBase64) {
 }
 
 TEST_F(Base64Test, calculateDecodedSizeProperSize) {
-  size_t encoded_size{0};
-  size_t decoded_size{0};
+  size_t encodedSize = 20;
+  EXPECT_EQ(
+      13,
+      Base64::calculateDecodedSize("SGVsbG8sIFdvcmxkIQ==", encodedSize)
+          .value());
+  EXPECT_EQ(18, encodedSize);
 
-  encoded_size = 20;
-  Base64::calculateDecodedSize(
-      "SGVsbG8sIFdvcmxkIQ==", encoded_size, decoded_size);
-  EXPECT_EQ(18, encoded_size);
-  EXPECT_EQ(13, decoded_size);
+  encodedSize = 18;
+  EXPECT_EQ(
+      13,
+      Base64::calculateDecodedSize("SGVsbG8sIFdvcmxkIQ", encodedSize).value());
+  EXPECT_EQ(18, encodedSize);
 
-  encoded_size = 18;
-  Base64::calculateDecodedSize(
-      "SGVsbG8sIFdvcmxkIQ", encoded_size, decoded_size);
-  EXPECT_EQ(18, encoded_size);
-  EXPECT_EQ(13, decoded_size);
-
-  encoded_size = 21;
+  encodedSize = 21;
   EXPECT_EQ(
       Status::UserError(
           "Base64::decode() - invalid input string: string length is not a multiple of 4."),
+      Base64::calculateDecodedSize("SGVsbG8sIFdvcmxkIQ===", encodedSize)
+          .error());
+
+  encodedSize = 32;
+  EXPECT_EQ(
+      23,
       Base64::calculateDecodedSize(
-          "SGVsbG8sIFdvcmxkIQ===", encoded_size, decoded_size));
+          "QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4=", encodedSize)
+          .value());
+  EXPECT_EQ(31, encodedSize);
 
-  encoded_size = 32;
-  Base64::calculateDecodedSize(
-      "QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4=", encoded_size, decoded_size);
-  EXPECT_EQ(31, encoded_size);
-  EXPECT_EQ(23, decoded_size);
+  encodedSize = 31;
+  EXPECT_EQ(
+      23,
+      Base64::calculateDecodedSize(
+          "QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4", encodedSize)
+          .value());
+  EXPECT_EQ(31, encodedSize);
 
-  encoded_size = 31;
-  Base64::calculateDecodedSize(
-      "QmFzZTY0IGVuY29kaW5nIGlzIGZ1bi4", encoded_size, decoded_size);
-  EXPECT_EQ(31, encoded_size);
-  EXPECT_EQ(23, decoded_size);
+  encodedSize = 16;
+  EXPECT_EQ(
+      10,
+      Base64::calculateDecodedSize("MTIzNDU2Nzg5MA==", encodedSize).value());
+  EXPECT_EQ(14, encodedSize);
 
-  encoded_size = 16;
-  Base64::calculateDecodedSize("MTIzNDU2Nzg5MA==", encoded_size, decoded_size);
-  EXPECT_EQ(14, encoded_size);
-  EXPECT_EQ(10, decoded_size);
-
-  encoded_size = 14;
-  Base64::calculateDecodedSize("MTIzNDU2Nzg5MA", encoded_size, decoded_size);
-  EXPECT_EQ(14, encoded_size);
-  EXPECT_EQ(10, decoded_size);
+  encodedSize = 14;
+  EXPECT_EQ(
+      10, Base64::calculateDecodedSize("MTIzNDU2Nzg5MA", encodedSize).value());
+  EXPECT_EQ(14, encodedSize);
 }
 
 TEST_F(Base64Test, checksPadding) {

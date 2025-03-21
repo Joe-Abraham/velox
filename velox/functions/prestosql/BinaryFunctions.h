@@ -295,13 +295,12 @@ struct FromBase64Function {
   template <typename T>
   FOLLY_ALWAYS_INLINE Status call(out_type<Varbinary>& result, const T& input) {
     auto inputSize = input.size();
-    size_t decodedSize;
-    auto status = encoding::Base64::calculateDecodedSize(
-        input.data(), inputSize, decodedSize);
-    if (!status.ok()) {
-      return status;
+    auto decodedSize =
+        encoding::Base64::calculateDecodedSize(input.data(), inputSize);
+    if (decodedSize.hasError()) {
+      return decodedSize.error();
     }
-    result.resize(decodedSize);
+    result.resize(decodedSize.value());
     return encoding::Base64::decode(
         input.data(), inputSize, result.data(), result.size());
   }
@@ -313,13 +312,12 @@ struct FromBase64UrlFunction {
   FOLLY_ALWAYS_INLINE Status
   call(out_type<Varbinary>& result, const arg_type<Varchar>& input) {
     auto inputSize = input.size();
-    size_t decodedSize;
-    auto status = encoding::Base64::calculateDecodedSize(
-        input.data(), inputSize, decodedSize);
-    if (!status.ok()) {
-      return status;
+    auto decodedSize =
+        encoding::Base64::calculateDecodedSize(input.data(), inputSize);
+    if (decodedSize.hasError()) {
+      return decodedSize.error();
     }
-    result.resize(decodedSize);
+    result.resize(decodedSize.value());
     return encoding::Base64::decodeUrl(
         input.data(), inputSize, result.data(), result.size());
   }

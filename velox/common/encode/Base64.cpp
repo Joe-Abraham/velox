@@ -319,13 +319,12 @@ void Base64::decode(
     const std::pair<const char*, int32_t>& payload,
     std::string& decodedOutput) {
   size_t inputSize = payload.second;
-  size_t decodedSize{0};
-  auto status = calculateDecodedSize(payload.first, inputSize, decodedSize);
-  if (!status.ok()) {
-    VELOX_USER_FAIL(status.message());
+  auto decodedSize = calculateDecodedSize(payload.first, inputSize);
+  if (decodedSize.hasError()) {
+    VELOX_USER_FAIL(decodedSize.error().message());
   }
-  decodedOutput.resize(decodedSize);
-  status = decode(
+  decodedOutput.resize(decodedSize.value());
+  auto status = decode(
       payload.first, inputSize, decodedOutput.data(), decodedOutput.size());
   if (!status.ok()) {
     VELOX_USER_FAIL(status.message());
@@ -334,26 +333,27 @@ void Base64::decode(
 
 // static
 void Base64::decode(const char* input, size_t inputSize, char* outputBuffer) {
-  size_t outputSize{0};
-  if (auto status = calculateDecodedSize(input, inputSize, outputSize);
-      !status.ok() ||
-      !(status = decode(input, inputSize, outputBuffer, outputSize)).ok()) {
+  auto outputSize = calculateDecodedSize(input, inputSize);
+  if (outputSize.hasError()) {
+    VELOX_USER_FAIL(outputSize.error().message());
+  }
+  auto status = decode(input, inputSize, outputBuffer, outputSize.value());
+  if (!status.ok()) {
     VELOX_USER_FAIL(status.message());
   }
 }
 
 // static
-Status Base64::base64ReverseLookup(
+Expected<uint8_t> Base64::base64ReverseLookup(
     char encodedChar,
-    const ReverseIndex& reverseIndex,
-    uint8_t& reverseLookupValue) {
-  reverseLookupValue = reverseIndex[static_cast<uint8_t>(encodedChar)];
+    const ReverseIndex& reverseIndex) {
+  auto reverseLookupValue = reverseIndex[static_cast<uint8_t>(encodedChar)];
   if (reverseLookupValue >= 0x40) {
-    return Status::UserError(fmt::format(
+    return folly::makeUnexpected(Status::UserError(fmt::format(
         "decode() - invalid input string: invalid character '{}'",
-        encodedChar));
+        encodedChar)));
   }
-  return Status::OK();
+  return reverseLookupValue;
 }
 
 // static
@@ -367,13 +367,11 @@ Status Base64::decode(
 }
 
 // static
-Status Base64::calculateDecodedSize(
+Expected<size_t> Base64::calculateDecodedSize(
     const char* input,
-    size_t& inputSize,
-    size_t& decodedSize) {
+    size_t& inputSize) {
   if (inputSize == 0) {
-    decodedSize = 0;
-    return Status::OK();
+    return 0;
   }
 
   // Check if the input string is padded
@@ -381,12 +379,13 @@ Status Base64::calculateDecodedSize(
     // If padded, ensure that the string length is a multiple of the encoded
     // block size
     if (inputSize % kEncodedBlockByteSize != 0) {
-      return Status::UserError(
-          "Base64::decode() - invalid input string: "
-          "string length is not a multiple of 4.");
+      return folly::makeUnexpected(
+          Status::UserError("Base64::decode() - invalid input string: "
+                            "string length is not a multiple of 4."));
     }
 
-    decodedSize = (inputSize * kBinaryBlockByteSize) / kEncodedBlockByteSize;
+    auto decodedSize =
+        (inputSize * kBinaryBlockByteSize) / kEncodedBlockByteSize;
     auto paddingCount = numPadding(input, inputSize);
     inputSize -= paddingCount;
 
@@ -395,23 +394,23 @@ Status Base64::calculateDecodedSize(
     decodedSize -=
         ((paddingCount * kBinaryBlockByteSize) + (kEncodedBlockByteSize - 1)) /
         kEncodedBlockByteSize;
-    return Status::OK();
+    return decodedSize;
   }
   // If not padded, Calculate extra bytes, if any
   auto extraBytes = inputSize % kEncodedBlockByteSize;
-  decodedSize = (inputSize / kEncodedBlockByteSize) * kBinaryBlockByteSize;
+  auto decodedSize = (inputSize / kEncodedBlockByteSize) * kBinaryBlockByteSize;
 
   // Adjust the needed size for extra bytes, if present
   if (extraBytes) {
     if (extraBytes == 1) {
-      return Status::UserError(
+      return folly::makeUnexpected(Status::UserError(
           "Base64::decode() - invalid input string: "
-          "string length cannot be 1 more than a multiple of 4.");
+          "string length cannot be 1 more than a multiple of 4."));
     }
     decodedSize += (extraBytes * kBinaryBlockByteSize) / kEncodedBlockByteSize;
   }
 
-  return Status::OK();
+  return decodedSize;
 }
 
 // static
@@ -425,12 +424,12 @@ Status Base64::decodeImpl(
     return Status::OK();
   }
 
-  size_t decodedSize;
-  auto status = calculateDecodedSize(input, inputSize, decodedSize);
-  if (!status.ok()) {
-    return status;
+  auto decodedSize = calculateDecodedSize(input, inputSize);
+  if (decodedSize.hasError()) {
+    return decodedSize.error();
   }
-  if (outputSize < decodedSize) {
+
+  if (outputSize < decodedSize.value()) {
     return Status::UserError(
         "Base64::decode() - invalid output string: "
         "output string is too small.");
@@ -442,13 +441,12 @@ Status Base64::decodeImpl(
     // the appropriate shifts to rebuild the original and then split that back
     // into the original 8-bit bytes.
     uint32_t decodedBlock = 0;
-    uint8_t reverseLookupValue;
     for (int i = 0; i < 4; ++i) {
-      status = base64ReverseLookup(input[i], reverseIndex, reverseLookupValue);
-      if (!status.ok()) {
-        return status;
+      auto reverseLookupValue = base64ReverseLookup(input[i], reverseIndex);
+      if (reverseLookupValue.hasError()) {
+        return reverseLookupValue.error();
       }
-      decodedBlock |= reverseLookupValue << (18 - 6 * i);
+      decodedBlock |= reverseLookupValue.value() << (18 - 6 * i);
     }
     outputBuffer[0] = static_cast<char>((decodedBlock >> 16) & 0xff);
     outputBuffer[1] = static_cast<char>((decodedBlock >> 8) & 0xff);
@@ -459,33 +457,31 @@ Status Base64::decodeImpl(
   // last 2 characters may or may not exist.
   if (inputSize >= 2) {
     uint32_t decodedBlock = 0;
-    uint8_t reverseLookupValue;
 
     // Process the first two characters
     for (int i = 0; i < 2; ++i) {
-      status = base64ReverseLookup(input[i], reverseIndex, reverseLookupValue);
-      if (!status.ok()) {
-        return status;
+      auto reverseLookupValue = base64ReverseLookup(input[i], reverseIndex);
+      if (reverseLookupValue.hasError()) {
+        return reverseLookupValue.error();
       }
-      decodedBlock |= reverseLookupValue << (18 - 6 * i);
+      decodedBlock |= reverseLookupValue.value() << (18 - 6 * i);
     }
     outputBuffer[0] = static_cast<char>((decodedBlock >> 16) & 0xff);
 
     if (inputSize > 2) {
-      status = base64ReverseLookup(input[2], reverseIndex, reverseLookupValue);
-      if (!status.ok()) {
-        return status;
+      auto reverseLookupValue = base64ReverseLookup(input[2], reverseIndex);
+      if (reverseLookupValue.hasError()) {
+        return reverseLookupValue.error();
       }
-      decodedBlock |= reverseLookupValue << 6;
+      decodedBlock |= reverseLookupValue.value() << 6;
       outputBuffer[1] = static_cast<char>((decodedBlock >> 8) & 0xff);
 
       if (inputSize > 3) {
-        status =
-            base64ReverseLookup(input[3], reverseIndex, reverseLookupValue);
-        if (!status.ok()) {
-          return status;
+        auto reverseLookupValue = base64ReverseLookup(input[3], reverseIndex);
+        if (reverseLookupValue.hasError()) {
+          return reverseLookupValue.error();
         }
-        decodedBlock |= reverseLookupValue;
+        decodedBlock |= reverseLookupValue.value();
         outputBuffer[2] = static_cast<char>(decodedBlock & 0xff);
       }
     }
@@ -532,14 +528,13 @@ void Base64::decodeUrl(
     const std::pair<const char*, int32_t>& payload,
     std::string& decodedOutput) {
   size_t inputSize = payload.second;
-  size_t decodedSize{0};
-  auto status = calculateDecodedSize(payload.first, inputSize, decodedSize);
-  if (!status.ok()) {
-    VELOX_USER_FAIL(status.message());
+  auto decodedSize = calculateDecodedSize(payload.first, inputSize);
+  if (decodedSize.hasError()) {
+    VELOX_USER_FAIL(decodedSize.error().message());
   }
 
-  decodedOutput.resize(decodedSize);
-  status = decodeImpl(
+  decodedOutput.resize(decodedSize.value());
+  Status status = decodeImpl(
       payload.first,
       payload.second,
       decodedOutput.data(),
