@@ -28,6 +28,10 @@
 #include "velox/functions/prestosql/tests/utils/FunctionBaseTest.h"
 #include "velox/functions/remote/client/Remote.h"
 #include "velox/functions/remote/utils/restserver/RemoteFunctionRestService.h"
+#include "velox/functions/remote/utils/restserver/samplefuntions/RemoteAbsHandler.h"
+#include "velox/functions/remote/utils/restserver/samplefuntions/RemoteDivHandler.h"
+#include "velox/functions/remote/utils/restserver/samplefuntions/RemoteStrLenHandler.h"
+#include "velox/functions/remote/utils/restserver/samplefuntions/RemoteStrTrimHandler.h"
 
 using ::facebook::velox::test::assertEqualVectors;
 
@@ -56,42 +60,48 @@ class RemoteFunctionRestTest
   }
 
  private:
-  // Registers a remote functions to be used in this test.
+  template <typename Handler>
+  void registerRemoteFunctionHelper(
+      const std::string& functionName,
+      const std::string& returnType,
+      const std::vector<std::string>& argTypes,
+      const std::string& baseLocation) const {
+    auto signatureBuilder =
+        exec::FunctionSignatureBuilder().returnType(returnType);
+    for (auto& arg : argTypes) {
+      signatureBuilder.argumentType(arg);
+    }
+    auto finalSignature = signatureBuilder.build();
+
+    auto handler = std::make_shared<Handler>();
+    RestSession::registerFunctionHandler(functionName, handler);
+
+    RemoteVectorFunctionMetadata metadata;
+    metadata.serdeFormat = GetParam();
+    metadata.location = baseLocation + "/" + functionName;
+    registerRemoteFunction(functionName, {finalSignature}, metadata);
+  }
+
   void registerRemoteFunctions() const {
-    auto absSignature = {exec::FunctionSignatureBuilder()
-                             .returnType("integer")
-                             .argumentType("integer")
-                             .build()};
-    auto strLenSignature = {exec::FunctionSignatureBuilder()
-                                .returnType("integer")
-                                .argumentType("varchar")
-                                .build()};
-    auto strTrimSignature = {exec::FunctionSignatureBuilder()
-                                 .returnType("varchar")
-                                 .argumentType("varchar")
+    registerRemoteFunctionHelper<RemoteAbsHandler>(
+        "remote_abs", "integer", {"integer"}, location_);
+    registerRemoteFunctionHelper<RemoteStrLenHandler>(
+        "remote_strlen", "integer", {"varchar"}, location_);
+    registerRemoteFunctionHelper<RemoteStrTrimHandler>(
+        "remote_trim", "varchar", {"varchar"}, location_);
+    registerRemoteFunctionHelper<RemoteDivHandler>(
+        "remote_divide", "double", {"double", "double"}, location_);
+    registerRemoteFunctionHelper<RemoteAbsHandler>(
+        "remote_wrong_port", "integer", {"integer"}, wrongLocation_);
+
+    auto roundSignatures = {exec::FunctionSignatureBuilder()
+                                 .returnType("integer")
+                                 .argumentType("integer")
                                  .build()};
-    auto divSignatures = {exec::FunctionSignatureBuilder()
-                              .returnType("double")
-                              .argumentType("double")
-                              .argumentType("double")
-                              .build()};
-
-    auto registerFunction =
-        [&](const std::string& functionName,
-            const std::vector<exec::FunctionSignaturePtr>& signatures,
-            const std::string& baseLocation) {
-          RemoteVectorFunctionMetadata metadata;
-          metadata.serdeFormat = GetParam();
-          metadata.location = baseLocation + '/' + functionName;
-          registerRemoteFunction(functionName, signatures, metadata);
-        };
-
-    registerFunction("remote_abs", absSignature, location_);
-    registerFunction("remote_strlen", strLenSignature, location_);
-    registerFunction("remote_trim", strTrimSignature, location_);
-    registerFunction("remote_divide", divSignatures, location_);
-    registerFunction("remote_round", absSignature, location_);
-    registerFunction("remote_wrong_port", absSignature, wrongLocation_);
+    RemoteVectorFunctionMetadata metadata;
+    metadata.serdeFormat = GetParam();
+    metadata.location = location_ + "/remote_round";
+    registerRemoteFunction("remote_round", roundSignatures, metadata);
   }
 
   void initializeServer(uint16_t servicePort) {

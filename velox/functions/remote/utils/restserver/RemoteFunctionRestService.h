@@ -19,8 +19,10 @@
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>
 #include <boost/beast/http.hpp>
+#include <string>
+#include <unordered_map>
 
-#include "velox/common/memory/Memory.h"
+#include "velox/functions/remote/utils/restserver/RemoteFunctionRestHandler.h"
 #include "velox/vector/VectorStream.h"
 
 namespace facebook::velox::functions {
@@ -34,6 +36,14 @@ class RestSession : public std::enable_shared_from_this<RestSession> {
 
   /// Starts the session by initiating a read operation.
   void run();
+
+  // Register a function handler for a given function name
+  static void registerFunctionHandler(
+      const std::string& functionName,
+      std::shared_ptr<RemoteFunctionRestHandler> handler);
+
+  // Unregister a function handler
+  static void unregisterFunctionHandler(const std::string& functionName);
 
  private:
   // Initiates an asynchronous read operation.
@@ -88,25 +98,16 @@ class RestSession : public std::enable_shared_from_this<RestSession> {
   // Sends a success response with the given payload.
   void sendSuccessResponse(folly::IOBuf&& payload);
 
-  void handleRemoteAbs(
-      std::unique_ptr<folly::IOBuf> inputBuffer,
-      VectorSerde* serde);
-  void handleRemoteStrlen(
-      std::unique_ptr<folly::IOBuf> inputBuffer,
-      VectorSerde* serde);
-  void handleRemoteTrim(
-      std::unique_ptr<folly::IOBuf> inputBuffer,
-      VectorSerde* serde);
-  void handleRemoteDivide(
-      std::unique_ptr<folly::IOBuf> inputBuffer,
-      VectorSerde* serde);
-
   boost::asio::ip::tcp::socket socket_;
   boost::beast::flat_buffer buffer_;
   boost::beast::http::request<boost::beast::http::string_body> req_;
   boost::beast::http::response<boost::beast::http::string_body> res_;
   std::shared_ptr<memory::MemoryPool> pool_;
   std::string contentType_;
+
+  // Static registry of function handlers
+  static std::unordered_map<std::string, std::shared_ptr<RemoteFunctionRestHandler>>
+      functionHandlers_;
 };
 
 /// @brief Listens for incoming TCP connections and creates sessions.

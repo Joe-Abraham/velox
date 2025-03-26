@@ -87,6 +87,13 @@ void RestSession::handleRequest(
   }
 
   try {
+    auto handlerIt = functionHandlers_.find(functionName);
+    if (handlerIt == functionHandlers_.end()) {
+      VELOX_USER_FAIL(
+          "Function '{}' is not available on the server.", functionName);
+      return;
+    }
+
     std::unique_ptr<VectorSerde> serde;
     if (contentType_ == "application/X-presto-pages") {
       serde = std::make_unique<serializer::presto::PrestoVectorSerde>();
@@ -95,18 +102,14 @@ void RestSession::handleRequest(
     }
     auto inputBuffer = folly::IOBuf::copyBuffer(req.body());
 
-    if (functionName == "remote_abs") {
-      handleRemoteAbs(std::move(inputBuffer), serde.get());
-    } else if (functionName == "remote_strlen") {
-      handleRemoteStrlen(std::move(inputBuffer), serde.get());
-    } else if (functionName == "remote_trim") {
-      handleRemoteTrim(std::move(inputBuffer), serde.get());
-    } else if (functionName == "remote_divide") {
-      handleRemoteDivide(std::move(inputBuffer), serde.get());
-    } else {
-      VELOX_USER_FAIL(
-          "Function '{}' is not available on the server.", functionName);
-    }
+    // Let the handler process the request
+    handlerIt->second->handleRequest(
+        std::move(inputBuffer),
+        serde.get(),
+        pool_.get(),
+        [this](folly::IOBuf&& payload) {
+          sendSuccessResponse(std::move(payload));
+        });
 
   } catch (const std::exception& ex) {
     handleException(ex);
@@ -225,197 +228,20 @@ void RestSession::sendSuccessResponse(folly::IOBuf&& payload) {
       false);
 }
 
-void RestSession::handleRemoteAbs(
-    std::unique_ptr<folly::IOBuf> inputBuffer,
-    VectorSerde* serde) {
-  std::vector<std::string> argTypeNames = {"integer"};
-  std::string returnTypeName = "integer";
+// Initialize static member
+std::unordered_map<std::string, std::shared_ptr<RemoteFunctionRestHandler>>
+    RestSession::functionHandlers_;
 
-  auto argType = type::fbhive::HiveTypeParser().parse(argTypeNames[0]);
-  auto outType = type::fbhive::HiveTypeParser().parse(returnTypeName);
-
-  auto inputVector =
-      IOBufToRowVector(*inputBuffer, ROW({argType}), *pool_, serde);
-  VELOX_CHECK_EQ(
-      inputVector->childrenSize(),
-      1,
-      "Expected exactly 1 column for function 'remote_abs'.");
-
-  vector_size_t numRows = inputVector->size();
-  auto resultVector = BaseVector::create(argType, numRows, pool_.get());
-
-  auto inputFlat = inputVector->childAt(0)->asFlatVector<int32_t>();
-  auto outFlat = resultVector->asFlatVector<int32_t>();
-
-  for (vector_size_t i = 0; i < numRows; ++i) {
-    if (inputFlat->isNullAt(i)) {
-      outFlat->setNull(i, true);
-    } else {
-      int32_t val = inputFlat->valueAt(i);
-      outFlat->set(i, std::abs(val));
-    }
-  }
-
-  auto outputRowVector = std::make_shared<RowVector>(
-      pool_.get(),
-      ROW({outType}),
-      BufferPtr(),
-      numRows,
-      std::vector<VectorPtr>{resultVector});
-
-  auto payload =
-      rowVectorToIOBuf(outputRowVector, outputRowVector->size(), *pool_, serde);
-
-  sendSuccessResponse(std::move(payload));
+void RestSession::registerFunctionHandler(
+    const std::string& functionName,
+    std::shared_ptr<RemoteFunctionRestHandler> handler) {
+  functionHandlers_[functionName] = handler;
 }
 
-void RestSession::handleRemoteStrlen(
-    std::unique_ptr<folly::IOBuf> inputBuffer,
-    VectorSerde* serde) {
-  std::vector<std::string> argTypeNames = {"varchar"};
-  std::string returnTypeName = "integer";
-
-  auto argType = type::fbhive::HiveTypeParser().parse(argTypeNames[0]);
-  auto outType = type::fbhive::HiveTypeParser().parse(returnTypeName);
-
-  auto inputVector =
-      IOBufToRowVector(*inputBuffer, ROW({argType}), *pool_, serde);
-
-  VELOX_CHECK_EQ(
-      inputVector->childrenSize(),
-      1,
-      "Expected exactly 1 column for function 'remote_strlen'.");
-
-  const auto numRows = inputVector->size();
-  auto resultVector = BaseVector::create(outType, numRows, pool_.get());
-
-  auto inputFlat = inputVector->childAt(0)->asFlatVector<StringView>();
-  auto outFlat = resultVector->asFlatVector<int32_t>();
-
-  for (vector_size_t i = 0; i < numRows; ++i) {
-    if (inputFlat->isNullAt(i)) {
-      outFlat->setNull(i, true);
-    } else {
-      int32_t stringLen = inputFlat->valueAt(i).size();
-      outFlat->set(i, stringLen);
-    }
-  }
-
-  auto outputRowVector = std::make_shared<RowVector>(
-      pool_.get(),
-      ROW({outType}),
-      BufferPtr(),
-      numRows,
-      std::vector<VectorPtr>{resultVector});
-
-  auto payload =
-      rowVectorToIOBuf(outputRowVector, outputRowVector->size(), *pool_, serde);
-
-  sendSuccessResponse(std::move(payload));
+void RestSession::unregisterFunctionHandler(const std::string& functionName) {
+  functionHandlers_.erase(functionName);
 }
 
-void RestSession::handleRemoteTrim(
-    std::unique_ptr<folly::IOBuf> inputBuffer,
-    VectorSerde* serde) {
-  std::vector<std::string> argTypeNames = {"varchar"};
-  std::string returnTypeName = "varchar";
-
-  auto argType = type::fbhive::HiveTypeParser().parse(argTypeNames[0]);
-  auto outType = type::fbhive::HiveTypeParser().parse(returnTypeName);
-
-  auto inputVector =
-      IOBufToRowVector(*inputBuffer, ROW({argType}), *pool_, serde);
-
-  VELOX_CHECK_EQ(
-      inputVector->childrenSize(),
-      1,
-      "Expected exactly 1 column for function 'remote_strlen'.");
-
-  const auto numRows = inputVector->size();
-  auto resultVector = BaseVector::create(outType, numRows, pool_.get());
-
-  auto inputFlat = inputVector->childAt(0)->asFlatVector<StringView>();
-  auto outFlat = resultVector->asFlatVector<StringView>();
-
-  for (vector_size_t i = 0; i < numRows; ++i) {
-    if (inputFlat->isNullAt(i)) {
-      outFlat->setNull(i, true);
-    } else {
-      std::string result = inputFlat->valueAt(i).str();
-      result.erase(
-          std::remove_if(result.begin(), result.end(), ::isspace),
-          result.end());
-      outFlat->set(i, result.data());
-    }
-  }
-
-  auto outputRowVector = std::make_shared<RowVector>(
-      pool_.get(),
-      ROW({outType}),
-      BufferPtr(),
-      numRows,
-      std::vector<VectorPtr>{resultVector});
-
-  auto payload =
-      rowVectorToIOBuf(outputRowVector, outputRowVector->size(), *pool_, serde);
-
-  sendSuccessResponse(std::move(payload));
-}
-
-void RestSession::handleRemoteDivide(
-    std::unique_ptr<folly::IOBuf> inputBuffer,
-    VectorSerde* serde) {
-  std::vector<std::string> argTypeNames = {"double", "double"};
-  std::string returnTypeName = "double";
-
-  auto numType = type::fbhive::HiveTypeParser().parse(argTypeNames[0]);
-  auto denType = type::fbhive::HiveTypeParser().parse(argTypeNames[1]);
-  auto outType = type::fbhive::HiveTypeParser().parse(returnTypeName);
-
-  auto rowType = ROW({numType, denType});
-  auto inputVector = IOBufToRowVector(*inputBuffer, rowType, *pool_, serde);
-
-  VELOX_CHECK_EQ(
-      inputVector->childrenSize(),
-      2,
-      "Expected exactly 2 columns for function 'remote_divide'.");
-
-  const auto numRows = inputVector->size();
-
-  auto resultVector = BaseVector::create(outType, numRows, pool_.get());
-
-  auto inputFlat0 = inputVector->childAt(0)->asFlatVector<double>();
-  auto inputFlat1 = inputVector->childAt(1)->asFlatVector<double>();
-  auto outFlat = resultVector->asFlatVector<double>();
-
-  for (vector_size_t i = 0; i < numRows; ++i) {
-    if (inputFlat0->isNullAt(i) || inputFlat1->isNullAt(i)) {
-      // If either operand is null, result is null
-      outFlat->setNull(i, true);
-    } else {
-      double dividend = inputFlat0->valueAt(i);
-      double divisor = inputFlat1->valueAt(i);
-
-      if (divisor == 0.0) {
-        outFlat->setNull(i, true);
-      } else {
-        outFlat->set(i, dividend / divisor);
-      }
-    }
-  }
-
-  auto outputRowVector = std::make_shared<RowVector>(
-      pool_.get(),
-      ROW({outType}),
-      BufferPtr(),
-      numRows,
-      std::vector<VectorPtr>{resultVector});
-
-  auto payload =
-      rowVectorToIOBuf(outputRowVector, outputRowVector->size(), *pool_, serde);
-
-  sendSuccessResponse(std::move(payload));
-}
 void RestSession::onWrite(
     bool close,
     boost::beast::error_code ec,
