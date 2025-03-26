@@ -95,9 +95,9 @@ class RemoteFunctionRestTest
         "remote_wrong_port", "integer", {"integer"}, wrongLocation_);
 
     auto roundSignatures = {exec::FunctionSignatureBuilder()
-                                 .returnType("integer")
-                                 .argumentType("integer")
-                                 .build()};
+                                .returnType("integer")
+                                .argumentType("integer")
+                                .build()};
     RemoteVectorFunctionMetadata metadata;
     metadata.serdeFormat = GetParam();
     metadata.location = location_ + "/remote_round";

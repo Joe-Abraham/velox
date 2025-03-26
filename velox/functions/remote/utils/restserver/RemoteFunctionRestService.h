@@ -106,8 +106,9 @@ class RestSession : public std::enable_shared_from_this<RestSession> {
   std::string contentType_;
 
   // Static registry of function handlers
-  static std::unordered_map<std::string, std::shared_ptr<RemoteFunctionRestHandler>>
-      functionHandlers_;
+  static std::
+      unordered_map<std::string, std::shared_ptr<RemoteFunctionRestHandler>>
+          functionHandlers_;
 };
 
 /// @brief Listens for incoming TCP connections and creates sessions.
