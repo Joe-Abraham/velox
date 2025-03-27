@@ -28,10 +28,10 @@
 #include "velox/functions/prestosql/tests/utils/FunctionBaseTest.h"
 #include "velox/functions/remote/client/Remote.h"
 #include "velox/functions/remote/utils/restserver/RemoteFunctionRestService.h"
-#include "velox/functions/remote/utils/restserver/samplefuntions/RemoteAbsHandler.h"
-#include "velox/functions/remote/utils/restserver/samplefuntions/RemoteDivHandler.h"
-#include "velox/functions/remote/utils/restserver/samplefuntions/RemoteStrLenHandler.h"
-#include "velox/functions/remote/utils/restserver/samplefuntions/RemoteStrTrimHandler.h"
+#include "velox/functions/remote/utils/restserver/samplefunctions/RemoteAbsHandler.h"
+#include "velox/functions/remote/utils/restserver/samplefunctions/RemoteDivHandler.h"
+#include "velox/functions/remote/utils/restserver/samplefunctions/RemoteStrLenHandler.h"
+#include "velox/functions/remote/utils/restserver/samplefunctions/RemoteStrTrimHandler.h"
 
 using ::facebook::velox::test::assertEqualVectors;
 

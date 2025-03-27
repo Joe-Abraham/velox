@@ -206,8 +206,8 @@ class RemoteFunction : public exec::VectorFunction {
   folly::EventBase eventBase_;
 
   // Depending on the location, one of these is initialized by the visitor.
-  std::unique_ptr<RemoteFunctionClient> thriftClient_{nullptr};
-  std::unique_ptr<RestClient> restClient_{nullptr};
+  std::unique_ptr<RemoteFunctionClient> thriftClient_;
+  std::unique_ptr<RestClient> restClient_;
 
   remote::PageFormat serdeFormat_;
   std::unique_ptr<VectorSerde> serde_;
@@ -232,7 +232,7 @@ void registerRemoteFunction(
     std::vector<exec::FunctionSignaturePtr> signatures,
     const RemoteVectorFunctionMetadata& metadata,
     bool overwrite) {
-  registerStatefulVectorFunction(
+  exec::registerStatefulVectorFunction(
       name,
       signatures,
       std::bind(
