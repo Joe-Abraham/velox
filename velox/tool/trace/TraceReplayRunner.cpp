@@ -287,8 +287,8 @@ void TraceReplayRunner::init() {
   connector::hive::registerHivePartitionFunctionSerDe();
   connector::hive::HiveBucketProperty::registerSerDe();
 
-  functions::prestosql::registerAllScalarFunctions();
-  aggregate::prestosql::registerAllAggregateFunctions();
+  functions::prestosql::registerAllScalarFunctions("presto.default.");
+  aggregate::prestosql::registerAllAggregateFunctions("presto.default.");
   parse::registerTypeResolver();
 
   if (!facebook::velox::connector::hasConnectorFactory("hive")) {
