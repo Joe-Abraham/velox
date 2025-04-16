@@ -51,6 +51,24 @@ STEMMER_VERSION="2.2.0"
 DUCKDB_VERSION="v0.8.1"
 GEOS_VERSION="3.13.0"
 
+XSIMD_VERSION="10.0.0"
+ARROW_VERSION="15.0.0"
+SIMDJSON_VERSION="3.9.3"
+PROTOBUF_VERSION="21.8"
+
+# Adapter related versions.
+ABSEIL_VERSION="20240116.2"
+GRPC_VERSION="v1.48.1"
+CRC32_VERSION="1.1.2"
+NLOHMAN_JSON_VERSION="v3.11.3"
+GOOGLE_CLOUD_CPP_VERSION="v2.22.0"
+HADOOP_VERSION="2.10.1"
+AZURE_SDK_VERSION="12.8.0"
+
+CMAKE_BUILD_TYPE="${BUILD_TYPE:-Release}"
+BUILD_DUCKDB="${BUILD_DUCKDB:-true}"
+USE_CLANG="${USE_CLANG:-false}"
+
 function update_brew {
   DEFAULT_BREW_PATH=/usr/local/bin/brew
   if [ `arch` == "arm64" ] ;
@@ -101,6 +119,41 @@ function install_velox_deps_from_brew {
   do
     install_from_brew ${pkg}
   done
+}
+
+function install_xsimd {
+  wget_and_untar https://github.com/xtensor-stack/xsimd/archive/refs/tags/${XSIMD_VERSION}.tar.gz xsimd
+  cmake_install_dir xsimd
+}
+
+function install_arrow {
+  wget_and_untar https://github.com/apache/arrow/archive/apache-arrow-${ARROW_VERSION}.tar.gz arrow
+  cmake_install_dir arrow/cpp \
+    -DARROW_PARQUET=OFF \
+    -DARROW_WITH_THRIFT=ON \
+    -DARROW_WITH_LZ4=ON \
+    -DARROW_WITH_SNAPPY=ON \
+    -DARROW_WITH_ZLIB=ON \
+    -DARROW_WITH_ZSTD=ON \
+    -DARROW_JEMALLOC=OFF \
+    -DARROW_SIMD_LEVEL=NONE \
+    -DARROW_RUNTIME_SIMD_LEVEL=NONE \
+    -DARROW_WITH_UTF8PROC=OFF \
+    -DARROW_TESTING=ON \
+    -DCMAKE_INSTALL_PREFIX=${INSTALL_PREFIX} \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DARROW_BUILD_STATIC=ON \
+    -DBOOST_ROOT=${INSTALL_PREFIX}
+}
+
+function install_proxygen {
+  wget_and_untar https://github.com/facebook/proxygen/archive/refs/tags/${FB_OS_VERSION}.tar.gz proxygen
+  cmake_install_dir proxygen -DBUILD_TESTS=OFF
+}
+
+function install_protobuf {
+  wget_and_untar https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOBUF_VERSION}/protobuf-all-${PROTOBUF_VERSION}.tar.gz protobuf
+  cmake_install_dir protobuf -Dprotobuf_BUILD_TESTS=OFF -Dprotobuf_ABSL_PROVIDER=package
 }
 
 function install_boost {
@@ -183,6 +236,11 @@ function install_geos {
   fi
 }
 
+function install_simdjson {
+  wget_and_untar https://github.com/simdjson/simdjson/archive/refs/tags/v${SIMDJSON_VERSION}.tar.gz simdjson
+  cmake_install_dir simdjson
+}
+
 function install_velox_deps {
   run_and_time install_velox_deps_from_brew
   run_and_time install_ranges_v3
@@ -198,6 +256,11 @@ function install_velox_deps {
   run_and_time install_duckdb
   run_and_time install_stemmer
   run_and_time install_geos
+  run_and_time install_xsimd
+  run_and_time install_proxygen
+  run_and_time install_arrow
+  run_and_time install_protobuf
+  run_and_time install_simdjson
 }
 
 (return 2> /dev/null) && return # If script was sourced, don't run commands.
