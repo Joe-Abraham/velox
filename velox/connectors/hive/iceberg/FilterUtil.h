@@ -14,16 +14,17 @@
  * limitations under the License.
  */
 
-#include "velox/tool/trace/TraceReplayRunner.h"
+#pragma once
 
-#include <folly/init/Init.h>
-#include <gflags/gflags.h>
+#include "velox/expression/Expr.h"
+#include "velox/type/Filter.h"
+#include "velox/vector/ComplexVector.h"
 
-int main(int argc, char** argv) {
-  folly::Init init(&argc, &argv);
+namespace facebook::velox::connector::hive::iceberg {
+std::unique_ptr<common::Filter> createNotInFilter(
+    const VectorPtr& elements,
+    vector_size_t offset,
+    vector_size_t size,
+    TypeKind type);
 
-  facebook::velox::tool::trace::TraceReplayRunner runner;
-  runner.init();
-  runner.run();
-  return 0;
-}
+} // namespace facebook::velox::connector::hive::iceberg
