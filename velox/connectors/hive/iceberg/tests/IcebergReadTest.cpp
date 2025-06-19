@@ -1388,4 +1388,26 @@ TEST_F(HiveIcebergTest, equalityDeletesWithNegatedVarbinaryStringValues) {
       dataVectors);
 }
 
+TEST_F(HiveIcebergTest, equalityDeletesWithNegatedVarbinaryStringValues1) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
+  std::unordered_map<int8_t, std::vector<std::vector<std::string>>>
+      equalityDeleteVectorMap;
+
+  equalityFieldIdsMap.insert({0, {1}});
+  equalityDeleteVectorMap.insert({0, {{"apple", "cherry", ""}}});
+
+  std::vector<RowVectorPtr> dataVectors = {makeRowVector(
+      {"c0"},
+      {makeFlatVector<std::string>(
+          {"apple", "banana", "cherry", "date", "elderberry", ""})})};
+
+  assertEqualityDeletes(
+      equalityDeleteVectorMap,
+      equalityFieldIdsMap,
+      "SELECT * FROM tmp WHERE c0 NOT IN ('apple', 'cherry', '')",
+      dataVectors);
+}
+
 } // namespace facebook::velox::connector::hive::iceberg
