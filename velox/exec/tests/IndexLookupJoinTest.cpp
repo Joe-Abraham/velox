@@ -80,16 +80,7 @@ class IndexLookupJoinTest : public IndexLookupJoinTestBase,
     connector::hive::HiveColumnHandle::registerSerDe();
     Type::registerSerDe();
     core::ITypedExpr::registerSerDe();
-    connector::registerConnectorFactory(
-        std::make_shared<TestIndexConnectorFactory>());
-    std::shared_ptr<connector::Connector> connector =
-        connector::getConnectorFactory(kTestIndexConnectorName)
-            ->newConnector(
-                kTestIndexConnectorName,
-                {},
-                nullptr,
-                connectorCpuExecutor_.get());
-    connector::registerConnector(connector);
+    TestIndexConnectorFactory::registerConnector(connectorCpuExecutor_.get());
 
     keyType_ = ROW({"u0", "u1", "u2"}, {BIGINT(), BIGINT(), BIGINT()});
     valueType_ = ROW({"u3", "u4", "u5"}, {BIGINT(), BIGINT(), VARCHAR()});
@@ -97,8 +88,6 @@ class IndexLookupJoinTest : public IndexLookupJoinTestBase,
     probeType_ = ROW(
         {"t0", "t1", "t2", "t3", "t4", "t5"},
         {BIGINT(), BIGINT(), BIGINT(), BIGINT(), ARRAY(BIGINT()), VARCHAR()});
-
-    TestIndexTableHandle::registerSerDe();
   }
 
   void TearDown() override {
@@ -113,81 +102,25 @@ class IndexLookupJoinTest : public IndexLookupJoinTestBase,
     ASSERT_EQ(plan->toString(true, true), copy->toString(true, true));
   }
 
-  // Create index table with the given key and value inputs.
-  std::shared_ptr<TestIndexTable> createIndexTable(
-      int numEqualJoinKeys,
-      const RowVectorPtr& keyData,
-      const RowVectorPtr& valueData) {
-    const auto keyType =
-        std::dynamic_pointer_cast<const RowType>(keyData->type());
-    VELOX_CHECK_GE(keyType->size(), 1);
-    VELOX_CHECK_GE(keyType->size(), numEqualJoinKeys);
-    auto valueType =
-        std::dynamic_pointer_cast<const RowType>(valueData->type());
-    VELOX_CHECK_GE(valueType->size(), 1);
-    const auto numRows = keyData->size();
-    VELOX_CHECK_EQ(numRows, valueData->size());
-
-    std::vector<std::unique_ptr<VectorHasher>> hashers;
-    hashers.reserve(numEqualJoinKeys);
-    std::vector<VectorPtr> keyVectors;
-    keyVectors.reserve(numEqualJoinKeys);
-    for (auto i = 0; i < numEqualJoinKeys; ++i) {
-      hashers.push_back(std::make_unique<VectorHasher>(keyType->childAt(i), i));
-      keyVectors.push_back(keyData->childAt(i));
-    }
-
-    std::vector<TypePtr> dependentTypes;
-    std::vector<VectorPtr> dependentVectors;
-    for (int i = numEqualJoinKeys; i < keyType->size(); ++i) {
-      dependentTypes.push_back(keyType->childAt(i));
-      dependentVectors.push_back(keyData->childAt(i));
-    }
-    for (int i = 0; i < valueType->size(); ++i) {
-      dependentTypes.push_back(valueType->childAt(i));
-      dependentVectors.push_back(valueData->childAt(i));
-    }
-
-    // Create the table.
-    auto table = HashTable<false>::createForJoin(
-        std::move(hashers),
-        /*dependentTypes=*/dependentTypes,
-        /*allowDuplicates=*/true,
-        /*hasProbedFlag=*/false,
-        /*minTableSizeForParallelJoinBuild=*/1,
-        pool_.get());
-
-    // Insert data into the row container.
-    auto* rowContainer = table->rows();
-    std::vector<DecodedVector> decodedVectors;
-    for (auto& vector : keyData->children()) {
-      decodedVectors.emplace_back(*vector);
-    }
-    for (auto& vector : valueData->children()) {
-      decodedVectors.emplace_back(*vector);
-    }
-
-    for (auto row = 0; row < numRows; ++row) {
-      auto* newRow = rowContainer->newRow();
-
-      for (auto col = 0; col < decodedVectors.size(); ++col) {
-        rowContainer->store(decodedVectors[col], row, newRow, col);
-      }
-    }
-
-    // Build the table index.
-    table->prepareJoinTable({}, BaseHashTable::kNoSpillInputStartPartitionBit);
-    return std::make_shared<TestIndexTable>(
-        std::move(keyType), std::move(valueType), std::move(table));
-  }
-
   // Makes index table handle with the specified index table and async lookup
   // flag.
-  std::shared_ptr<TestIndexTableHandle> makeIndexTableHandle(
+  static std::shared_ptr<TestIndexTableHandle> makeIndexTableHandle(
       const std::shared_ptr<TestIndexTable>& indexTable,
       bool asyncLookup) {
     return std::make_shared<TestIndexTableHandle>(
         kTestIndexConnectorName, indexTable, asyncLookup);
+  }
+
+  static std::
+      unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+      makeIndexColumnHandles(const std::vector<std::string>& names) {
+    std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
+        handles;
+    for (const auto& name : names) {
+      handles.emplace(name, std::make_shared<TestIndexColumnHandle>(name));
+    }
+
+    return handles;
   }
 
   const std::unique_ptr<folly::CPUThreadPoolExecutor> connectorCpuExecutor_{
@@ -241,8 +174,7 @@ TEST_P(IndexLookupJoinTest, joinCondition) {
 TEST_P(IndexLookupJoinTest, planNodeAndSerde) {
   TestIndexTableHandle::registerSerDe();
 
-  auto indexConnectorHandle = std::make_shared<TestIndexTableHandle>(
-      kTestIndexConnectorName, nullptr, true);
+  auto indexConnectorHandle = makeIndexTableHandle(nullptr, true);
 
   auto left = makeRowVector(
       {"t0", "t1", "t2", "t3", "t4"},
@@ -269,7 +201,7 @@ TEST_P(IndexLookupJoinTest, planNodeAndSerde) {
   auto planBuilder = PlanBuilder();
   auto nonIndexTableScan = std::dynamic_pointer_cast<const core::TableScanNode>(
       PlanBuilder::TableScanBuilder(planBuilder)
-          .outputType(std::dynamic_pointer_cast<const RowType>(right->type()))
+          .outputType(asRowType(right->type()))
           .endTableScan()
           .planNode());
   VELOX_CHECK_NOT_NULL(nonIndexTableScan);
@@ -277,7 +209,7 @@ TEST_P(IndexLookupJoinTest, planNodeAndSerde) {
   auto indexTableScan = std::dynamic_pointer_cast<const core::TableScanNode>(
       PlanBuilder::TableScanBuilder(planBuilder)
           .tableHandle(indexConnectorHandle)
-          .outputType(std::dynamic_pointer_cast<const RowType>(right->type()))
+          .outputType(asRowType(right->type()))
           .endTableScan()
           .planNode());
   VELOX_CHECK_NOT_NULL(indexTableScan);
@@ -795,18 +727,19 @@ TEST_P(IndexLookupJoinTest, equalJoin) {
     createDuckDbTable("t", probeVectors);
     createDuckDbTable("u", {tableData.tableData});
 
-    const auto indexTable = createIndexTable(
-        /*numEqualJoinKeys=*/3, tableData.keyData, tableData.valueData);
+    const auto indexTable = TestIndexTable::create(
+        /*numEqualJoinKeys=*/3,
+        tableData.keyData,
+        tableData.valueData,
+        *pool());
     const auto indexTableHandle =
         makeIndexTableHandle(indexTable, GetParam().asyncLookup);
     auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-    std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
-        columnHandles;
     const auto indexScanNode = makeIndexScanNode(
         planNodeIdGenerator,
         indexTableHandle,
         makeScanOutputType(testData.scanOutputColumns),
-        columnHandles);
+        makeIndexColumnHandles(testData.scanOutputColumns));
 
     auto plan = makeLookupPlan(
         planNodeIdGenerator,
@@ -1250,18 +1183,19 @@ TEST_P(IndexLookupJoinTest, betweenJoinCondition) {
     createDuckDbTable("t", probeVectors);
     createDuckDbTable("u", {tableData.tableData});
 
-    const auto indexTable = createIndexTable(
-        /*numEqualJoinKeys=*/2, tableData.keyData, tableData.valueData);
+    const auto indexTable = TestIndexTable::create(
+        /*numEqualJoinKeys=*/2,
+        tableData.keyData,
+        tableData.valueData,
+        *pool());
     const auto indexTableHandle =
         makeIndexTableHandle(indexTable, GetParam().asyncLookup);
     auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-    std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
-        columnHandles;
     const auto indexScanNode = makeIndexScanNode(
         planNodeIdGenerator,
         indexTableHandle,
         makeScanOutputType(testData.lookupOutputColumns),
-        columnHandles);
+        makeIndexColumnHandles(testData.lookupOutputColumns));
 
     auto plan = makeLookupPlan(
         planNodeIdGenerator,
@@ -1571,18 +1505,19 @@ TEST_P(IndexLookupJoinTest, inJoinCondition) {
     createDuckDbTable("t", probeVectors);
     createDuckDbTable("u", {tableData.tableData});
 
-    const auto indexTable = createIndexTable(
-        /*numEqualJoinKeys=*/2, tableData.keyData, tableData.valueData);
+    const auto indexTable = TestIndexTable::create(
+        /*numEqualJoinKeys=*/2,
+        tableData.keyData,
+        tableData.valueData,
+        *pool());
     const auto indexTableHandle =
         makeIndexTableHandle(indexTable, GetParam().asyncLookup);
     auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-    std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
-        columnHandles;
     const auto indexScanNode = makeIndexScanNode(
         planNodeIdGenerator,
         indexTableHandle,
         makeScanOutputType(testData.lookupOutputColumns),
-        columnHandles);
+        makeIndexColumnHandles(testData.lookupOutputColumns));
 
     auto plan = makeLookupPlan(
         planNodeIdGenerator,
@@ -1622,18 +1557,16 @@ DEBUG_ONLY_TEST_P(IndexLookupJoinTest, connectorError) {
         }
       }));
 
-  const auto indexTable = createIndexTable(
-      /*numEqualJoinKeys=*/3, tableData.keyData, tableData.valueData);
+  const auto indexTable = TestIndexTable::create(
+      /*numEqualJoinKeys=*/3, tableData.keyData, tableData.valueData, *pool());
   const auto indexTableHandle =
       makeIndexTableHandle(indexTable, GetParam().asyncLookup);
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
-      columnHandles;
   const auto indexScanNode = makeIndexScanNode(
       planNodeIdGenerator,
       indexTableHandle,
       makeScanOutputType({"u0", "u1", "u2", "u5"}),
-      columnHandles);
+      makeIndexColumnHandles({"u0", "u1", "u2", "u5"}));
 
   auto plan = makeLookupPlan(
       planNodeIdGenerator,
@@ -1691,18 +1624,16 @@ DEBUG_ONLY_TEST_P(IndexLookupJoinTest, prefetch) {
         asyncLookupWait.await([&] { return !asyncLookupWaitFlag.load(); });
       }));
 
-  const auto indexTable = createIndexTable(
-      /*numEqualJoinKeys=*/3, tableData.keyData, tableData.valueData);
+  const auto indexTable = TestIndexTable::create(
+      /*numEqualJoinKeys=*/3, tableData.keyData, tableData.valueData, *pool());
   const auto indexTableHandle =
       makeIndexTableHandle(indexTable, GetParam().asyncLookup);
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
-      columnHandles;
   const auto indexScanNode = makeIndexScanNode(
       planNodeIdGenerator,
       indexTableHandle,
       makeScanOutputType({"u0", "u1", "u2", "u3", "u5"}),
-      columnHandles);
+      makeIndexColumnHandles({"u0", "u1", "u2", "u3", "u5"}));
 
   auto plan = makeLookupPlan(
       planNodeIdGenerator,
@@ -1790,18 +1721,20 @@ TEST_P(IndexLookupJoinTest, outputBatchSizeWithInnerJoin) {
     createDuckDbTable("t", probeVectors);
     createDuckDbTable("u", {tableData.tableData});
 
-    const auto indexTable = createIndexTable(
-        /*numEqualJoinKeys=*/3, tableData.keyData, tableData.valueData);
+    const auto indexTable = TestIndexTable::create(
+        /*numEqualJoinKeys=*/3,
+        tableData.keyData,
+        tableData.valueData,
+        *pool());
     const auto indexTableHandle =
         makeIndexTableHandle(indexTable, GetParam().asyncLookup);
     auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-    std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
-        columnHandles;
+
     const auto indexScanNode = makeIndexScanNode(
         planNodeIdGenerator,
         indexTableHandle,
         makeScanOutputType({"u0", "u1", "u2", "u5"}),
-        columnHandles);
+        makeIndexColumnHandles({"u0", "u1", "u2", "u5"}));
 
     auto plan = makeLookupPlan(
         planNodeIdGenerator,
@@ -1895,18 +1828,19 @@ TEST_P(IndexLookupJoinTest, outputBatchSizeWithLeftJoin) {
     createDuckDbTable("t", probeVectors);
     createDuckDbTable("u", {tableData.tableData});
 
-    const auto indexTable = createIndexTable(
-        /*numEqualJoinKeys=*/3, tableData.keyData, tableData.valueData);
+    const auto indexTable = TestIndexTable::create(
+        /*numEqualJoinKeys=*/3,
+        tableData.keyData,
+        tableData.valueData,
+        *pool());
     const auto indexTableHandle =
         makeIndexTableHandle(indexTable, GetParam().asyncLookup);
     auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-    std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
-        columnHandles;
     const auto indexScanNode = makeIndexScanNode(
         planNodeIdGenerator,
         indexTableHandle,
         makeScanOutputType({"u0", "u1", "u2", "u5"}),
-        columnHandles);
+        makeIndexColumnHandles({"u0", "u1", "u2", "u5"}));
 
     auto plan = makeLookupPlan(
         planNodeIdGenerator,
@@ -1967,18 +1901,16 @@ DEBUG_ONLY_TEST_P(IndexLookupJoinTest, runtimeStats) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100)); // NOLINT
       }));
 
-  const auto indexTable = createIndexTable(
-      /*numEqualJoinKeys=*/3, tableData.keyData, tableData.valueData);
+  const auto indexTable = TestIndexTable::create(
+      /*numEqualJoinKeys=*/3, tableData.keyData, tableData.valueData, *pool());
   const auto indexTableHandle =
       makeIndexTableHandle(indexTable, GetParam().asyncLookup);
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
-      columnHandles;
   const auto indexScanNode = makeIndexScanNode(
       planNodeIdGenerator,
       indexTableHandle,
       makeScanOutputType({"u0", "u1", "u2", "u3", "u5"}),
-      columnHandles);
+      makeIndexColumnHandles({"u0", "u1", "u2", "u3", "u5"}));
 
   auto plan = makeLookupPlan(
       planNodeIdGenerator,
@@ -2057,18 +1989,16 @@ TEST_P(IndexLookupJoinTest, barrier) {
   createDuckDbTable("t", probeVectors);
   createDuckDbTable("u", {tableData.tableData});
 
-  const auto indexTable = createIndexTable(
-      /*numEqualJoinKeys=*/3, tableData.keyData, tableData.valueData);
+  const auto indexTable = TestIndexTable::create(
+      /*numEqualJoinKeys=*/3, tableData.keyData, tableData.valueData, *pool());
   const auto indexTableHandle =
       makeIndexTableHandle(indexTable, GetParam().asyncLookup);
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
-  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
-      columnHandles;
   const auto indexScanNode = makeIndexScanNode(
       planNodeIdGenerator,
       indexTableHandle,
       makeScanOutputType({"u0", "u1", "u2", "u3", "u5"}),
-      columnHandles);
+      makeIndexColumnHandles({"u0", "u1", "u2", "u3", "u5"}));
 
   auto plan = makeLookupPlan(
       planNodeIdGenerator,
@@ -2128,8 +2058,8 @@ TEST_P(IndexLookupJoinTest, joinFuzzer) {
   createDuckDbTable("t", probeVectors);
   createDuckDbTable("u", {tableData.tableData});
 
-  const auto indexTable = createIndexTable(
-      /*numEqualJoinKeys=*/1, tableData.keyData, tableData.valueData);
+  const auto indexTable = TestIndexTable::create(
+      /*numEqualJoinKeys=*/1, tableData.keyData, tableData.valueData, *pool());
   const auto indexTableHandle =
       makeIndexTableHandle(indexTable, GetParam().asyncLookup);
   auto planNodeIdGenerator = std::make_shared<core::PlanNodeIdGenerator>();
@@ -2137,13 +2067,11 @@ TEST_P(IndexLookupJoinTest, joinFuzzer) {
   std::random_device rd;
   std::mt19937 g(rd());
   std::shuffle(scanOutput.begin(), scanOutput.end(), g);
-  std::unordered_map<std::string, std::shared_ptr<connector::ColumnHandle>>
-      columnHandles;
   const auto indexScanNode = makeIndexScanNode(
       planNodeIdGenerator,
       indexTableHandle,
       makeScanOutputType(scanOutput),
-      columnHandles);
+      makeIndexColumnHandles(scanOutput));
 
   auto plan = makeLookupPlan(
       planNodeIdGenerator,
