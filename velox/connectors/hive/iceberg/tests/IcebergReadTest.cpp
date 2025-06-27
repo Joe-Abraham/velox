@@ -1537,67 +1537,121 @@ TEST_F(HiveIcebergTest, equalityDeletesVarbinarySingleFileMultipleColumns) {
       dataVectors);
 }
 
-// Test for reading delete files with 2 columns, one integer, one
-// varchar/varbinary
-TEST_F(HiveIcebergTest, equalityDeletesTwoColumnsIntAndString) {
+TEST_F(HiveIcebergTest, equalityDeleteFileWithIntAndVarcharColumns) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  // Prepare data vectors: 2 columns, int and varchar
+  std::vector<RowVectorPtr> dataVectors = {makeRowVector(
+      {"c0", "c1"},
+      {
+          makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
+          makeFlatVector<std::string>(
+              {"apple", "banana", "cherry", "date", "elderberry"}),
+      })};
+
+  // Write data file
+  auto dataFilePaths = writeDataFiles(5, 2, 1, dataVectors);
+  auto dataFilePath = dataFilePaths[0]->getPath();
+
+  // Prepare delete file: delete (2, "banana") and (4, "date")
+  auto deleteFilePath = TempFilePath::create();
+  std::vector<RowVectorPtr> deleteVectors = {makeRowVector(
+      {"c0", "c1"},
+      {
+          makeFlatVector<int64_t>({2, 4}),
+          makeFlatVector<std::string>({"banana", "date"}),
+      })};
+  writeToFile(deleteFilePath->getPath(), deleteVectors);
+
+  // Create IcebergDeleteFile for equality deletes on both columns
+  std::vector<IcebergDeleteFile> deleteFiles;
+  std::vector<int32_t> equalityFieldIds = {1, 2}; // c0 and c1
+  deleteFiles.emplace_back(
+      FileContent::kEqualityDeletes,
+      deleteFilePath->getPath(),
+      fileFomat_,
+      2,
+      testing::internal::GetFileSize(
+          std::fopen(deleteFilePath->getPath().c_str(), "r")),
+      equalityFieldIds);
+
+  // Make split and run query
+  auto splits = makeIcebergSplits(dataFilePath, deleteFiles);
+  // Should filter out rows (2, "banana") and (4, "date")
+  assertEqualityDeletes(
+      splits.back(),
+      ROW({"c0", "c1"}, {BIGINT(), VARCHAR()}),
+      "SELECT * FROM tmp WHERE ((c0 <> 2 OR c1 <> 'banana') AND (c0 <> 4 OR c1 <> 'date'))");
+}
+
+TEST_F(HiveIcebergTest, equalityDeletesTwoColumnsIntegerAndVarchar) {
   folly::SingletonVault::singleton()->registrationComplete();
 
   std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-  std::unordered_map<int8_t, std::vector<std::vector<std::string>>>
+  std::unordered_map<int8_t, std::vector<std::vector<int64_t>>>
       equalityDeleteVectorMap;
+
   equalityFieldIdsMap.insert({0, {1, 2}});
 
-  // Delete (1, "apple"), (3, "banana")
-  equalityDeleteVectorMap.insert({0, {{"1", "3"}, {"apple", "banana"}}});
+  // Delete rows with (integer: 1, varchar: "apple") and (integer: 2, varchar:
+  // "banana")
+  equalityDeleteVectorMap.insert({0, {{1, 2}, {}}});
   std::vector<RowVectorPtr> dataVectors = {makeRowVector(
       {"c0", "c1"},
       {makeFlatVector<int64_t>({1, 2, 3, 4}),
        makeFlatVector<std::string>({"apple", "banana", "cherry", "date"})})};
+
+  std::unordered_map<int8_t, std::vector<std::vector<std::string>>>
+      equalityDeleteVectorMapStr;
+  equalityDeleteVectorMapStr.insert({0, {{"1", "2"}, {"apple", "banana"}}});
   assertEqualityDeletes(
-      equalityDeleteVectorMap,
+      equalityDeleteVectorMapStr,
       equalityFieldIdsMap,
-      "SELECT * FROM tmp WHERE ((c0 <> 1 OR c1 <> 'apple') AND (c0 <> 3 OR c1 <> 'banana'))",
+      "SELECT * FROM tmp WHERE ((c0 <> 1 OR c1 <> 'apple')AND (c0 <> 2 OR c1 <> 'banana'))",
       dataVectors);
 
   // Delete none
-  equalityDeleteVectorMap.clear();
-  equalityDeleteVectorMap.insert({0, {{}, {}}});
+  equalityDeleteVectorMapStr.clear();
+  equalityDeleteVectorMapStr.insert({0, {{}, {}}});
   assertEqualityDeletes(
-      equalityDeleteVectorMap,
+      equalityDeleteVectorMapStr,
       equalityFieldIdsMap,
       "SELECT * FROM tmp",
       dataVectors);
 
-  // Delete all
-  equalityDeleteVectorMap.clear();
-  equalityDeleteVectorMap.insert(
+  // Delete all rows
+  equalityDeleteVectorMapStr.clear();
+  equalityDeleteVectorMapStr.insert(
       {0, {{"1", "2", "3", "4"}, {"apple", "banana", "cherry", "date"}}});
   assertEqualityDeletes(
-      equalityDeleteVectorMap,
+      equalityDeleteVectorMapStr,
       equalityFieldIdsMap,
       "SELECT * FROM tmp WHERE 1 = 0",
       dataVectors);
 }
 
-TEST_F(HiveIcebergTest, equalityDeletesTwoColumnsIntAndVarbinary) {
+TEST_F(HiveIcebergTest, equalityDeletesTwoColumnsIntegerAndVarbinary) {
   folly::SingletonVault::singleton()->registrationComplete();
 
   std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
   std::unordered_map<int8_t, std::vector<std::vector<std::string>>>
       equalityDeleteVectorMap;
+
   equalityFieldIdsMap.insert({0, {1, 2}});
 
-  // Delete (1, b"\x01\x02"), (3, b"\x03\x04")
-  equalityDeleteVectorMap.insert({0, {{"1", "3"}, {"\x01\x02", "\x03\x04"}}});
+  // Delete rows with (integer: 1, varbinary: "\x01\x02") and (integer: 2,
+  // varbinary: "\x03\x04")
+  equalityDeleteVectorMap.insert({0, {{"1", "2"}, {"\x01\x02", "\x03\x04"}}});
   std::vector<RowVectorPtr> dataVectors = {makeRowVector(
       {"c0", "c1"},
-      {makeFlatVector<int64_t>({1, 2, 3, 4}),
+      {makeFlatVector<std::string>({"1", "2", "3", "4"}),
        makeFlatVector<std::string_view>(
            {"\x01\x02", "\x03\x04", "\x05\x06", "\x07\x08"})})};
+
   assertEqualityDeletes(
       equalityDeleteVectorMap,
       equalityFieldIdsMap,
-      "SELECT * FROM tmp WHERE ((c0 <> 1 OR hex(c1) <> '0102') AND (c0 <> 3 OR hex(c1) <> '0304'))",
+      "SELECT * FROM tmp WHERE ((c0 <> '1' OR hex(c1) <> '0102') AND (c0 <> '2' OR hex(c1) <> '0304'))",
       dataVectors);
 
   // Delete none
@@ -1609,7 +1663,7 @@ TEST_F(HiveIcebergTest, equalityDeletesTwoColumnsIntAndVarbinary) {
       "SELECT * FROM tmp",
       dataVectors);
 
-  // Delete all
+  // Delete all rows
   equalityDeleteVectorMap.clear();
   equalityDeleteVectorMap.insert(
       {0,
