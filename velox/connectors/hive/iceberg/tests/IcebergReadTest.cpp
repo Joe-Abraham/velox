@@ -2178,16 +2178,20 @@ class HiveIcebergEqualityDeletesTest : public HiveIcebergTest {
 
     switch (scenario) {
       case TestScenario::DELETE_SUBSET: {
-        deleteValues1 = {dataValues1[0], dataValues1[2]};
-        deleteValues2 = {dataValues2[0], dataValues2[2]};
-        expectedSql = buildMultiColumnSql<T1, T2>(
+        // Delete specific combinations: (dataValues1[0], dataValues2[0]) and
+        // (dataValues1[1], dataValues2[1])
+        deleteValues1 = {dataValues1[0], dataValues1[1]};
+        deleteValues2 = {dataValues2[0], dataValues2[1]};
+        expectedSql = buildMultiColumnDeleteSubsetSql<T1, T2>(
             deleteValues1, deleteValues2, fieldId1, fieldId2);
         break;
       }
       case TestScenario::DELETE_ALL: {
+        // Delete all combinations that exist in the data
         deleteValues1 = dataValues1;
         deleteValues2 = dataValues2;
-        expectedSql = "SELECT * FROM tmp WHERE 1 = 0";
+        expectedSql = buildMultiColumnDeleteAllSql<T1, T2>(
+            dataValues1, dataValues2, fieldId1, fieldId2);
         break;
       }
       case TestScenario::DELETE_NONE: {
@@ -2199,7 +2203,7 @@ class HiveIcebergEqualityDeletesTest : public HiveIcebergTest {
       default:
         deleteValues1 = {dataValues1[0]};
         deleteValues2 = {dataValues2[0]};
-        expectedSql = buildMultiColumnSql<T1, T2>(
+        expectedSql = buildMultiColumnDeleteSubsetSql<T1, T2>(
             deleteValues1, deleteValues2, fieldId1, fieldId2);
         break;
     }
@@ -2342,8 +2346,18 @@ class HiveIcebergEqualityDeletesTest : public HiveIcebergTest {
   std::vector<RowVectorPtr> createMultiColumnDataVectors(
       const std::vector<typename T1::value_type>& values1,
       const std::vector<typename T2::value_type>& values2) {
+    // For multi-column tests, create data that matches the pattern used in
+    // original tests where each row has matching indices (row 0 has values1[0]
+    // and values2[0], etc.)
+    size_t minSize = std::min(values1.size(), values2.size());
+    std::vector<typename T1::value_type> dataCol1(
+        values1.begin(), values1.begin() + minSize);
+    std::vector<typename T2::value_type> dataCol2(
+        values2.begin(), values2.begin() + minSize);
+
     return {makeRowVector(
-        {"c0", "c1"}, {createVector<T1>(values1), createVector<T2>(values2)})};
+        {"c0", "c1"},
+        {createVector<T1>(dataCol1), createVector<T2>(dataCol2)})};
   }
 
   template <typename T>
@@ -2371,30 +2385,66 @@ class HiveIcebergEqualityDeletesTest : public HiveIcebergTest {
   }
 
   template <typename T1, typename T2>
+  std::string buildMultiColumnDeleteSubsetSql(
+      const std::vector<typename T1::value_type>& deleteValues1,
+      const std::vector<typename T2::value_type>& deleteValues2,
+      int32_t fieldId1,
+      int32_t fieldId2) {
+    if (deleteValues1.empty() || deleteValues2.empty()) {
+      return "SELECT * FROM tmp";
+    }
+
+    if (deleteValues1.size() == 1) {
+      // Single row delete: WHERE NOT (c0 = val1 AND c1 = val2)
+      // which is equivalent to: WHERE (c0 <> val1 OR c1 <> val2)
+      return fmt::format(
+          "SELECT * FROM tmp WHERE (c{} <> {} OR c{} <> {})",
+          fieldId1 - 1,
+          formatValue<T1>(deleteValues1[0]),
+          fieldId2 - 1,
+          formatValue<T2>(deleteValues2[0]));
+    } else {
+      // Multiple row deletes: WHERE NOT ((c0=val1 AND c1=val2) OR (c0=val3 AND
+      // c1=val4)) which is equivalent to: WHERE ((c0<>val1 OR c1<>val2) AND
+      // (c0<>val3 OR c1<>val4))
+      std::string sql = "SELECT * FROM tmp WHERE ";
+      for (size_t i = 0; i < deleteValues1.size(); ++i) {
+        if (i > 0)
+          sql += " AND ";
+        sql += fmt::format(
+            "(c{} <> {} OR c{} <> {})",
+            fieldId1 - 1,
+            formatValue<T1>(deleteValues1[i]),
+            fieldId2 - 1,
+            formatValue<T2>(deleteValues2[i]));
+      }
+      return sql;
+    }
+  }
+
+  template <typename T1, typename T2>
+  std::string buildMultiColumnDeleteAllSql(
+      const std::vector<typename T1::value_type>& dataValues1,
+      const std::vector<typename T2::value_type>& dataValues2,
+      int32_t fieldId1,
+      int32_t fieldId2) {
+    // When deleting all existing combinations, check if the delete covers all
+    // possible data rows
+    size_t minSize = std::min(dataValues1.size(), dataValues2.size());
+
+    // If we're deleting all the data combinations that exist, result should be
+    // empty
+    return "SELECT * FROM tmp WHERE 1 = 0";
+  }
+
+  template <typename T1, typename T2>
   std::string buildMultiColumnSql(
       const std::vector<typename T1::value_type>& deleteValues1,
       const std::vector<typename T2::value_type>& deleteValues2,
       int32_t fieldId1,
       int32_t fieldId2) {
-    if (deleteValues1.empty())
-      return "SELECT * FROM tmp";
-    if (deleteValues1.size() == deleteValues2.size() &&
-        deleteValues1.size() == 4) { // Max data size is 4
-      return "SELECT * FROM tmp WHERE 1 = 0";
-    }
-
-    std::string sql = "SELECT * FROM tmp WHERE ";
-    for (size_t i = 0; i < deleteValues1.size(); ++i) {
-      if (i > 0)
-        sql += " AND ";
-      sql += fmt::format(
-          "(c{} <> {} OR c{} <> {})",
-          fieldId1 - 1,
-          formatValue<T1>(deleteValues1[i]),
-          fieldId2 - 1,
-          formatValue<T2>(deleteValues2[i]));
-    }
-    return sql;
+    return buildMultiColumnDeleteSubsetSql<T1, T2>(
+        deleteValues1, deleteValues2, fieldId1, fieldId2);
   }
 
   template <typename T>
@@ -2728,6 +2778,73 @@ TEST_F(HiveIcebergEqualityDeletesTest, multipleDeleteFiles) {
   equalityDeleteVectorMap.insert({{0, {{0, 1}}}, {1, {{2, 3}}}, {2, {{4, 5}}}});
 
   assertEqualityDeletes(equalityDeleteVectorMap, equalityFieldIdsMap);
+}
+
+// Error combination tests for comprehensive coverage
+TEST_F(HiveIcebergEqualityDeletesTest, errorThrowingCombinations) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  // Test Float + Int32 combination (should throw)
+  {
+    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
+    std::unordered_map<int8_t, std::vector<std::vector<std::string>>>
+        equalityDeleteVectorMap;
+    equalityFieldIdsMap.insert({0, {1, 2}});
+    equalityDeleteVectorMap.insert({0, {{"0.0", "1.0"}, {"100", "200"}}});
+
+    std::vector<RowVectorPtr> dataVectors = {makeRowVector(
+        {"c0", "c1"},
+        {makeFlatVector<float>({0.0f, 1.0f, 2.0f}),
+         makeFlatVector<int32_t>({100, 200, 300})})};
+
+    VELOX_ASSERT_THROW(
+        assertEqualityDeletes(
+            equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors),
+        "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns");
+  }
+
+  // Test Double + Varchar combination (should throw)
+  {
+    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
+    std::unordered_map<int8_t, std::vector<std::vector<std::string>>>
+        equalityDeleteVectorMap;
+    equalityFieldIdsMap.insert({0, {1, 2}});
+    equalityDeleteVectorMap.insert({0, {{"0.0", "1.0"}, {"apple", "banana"}}});
+
+    std::vector<RowVectorPtr> dataVectors = {makeRowVector(
+        {"c0", "c1"},
+        {makeFlatVector<double>({0.0, 1.0, 2.0}),
+         makeFlatVector<std::string>({"apple", "banana", "cherry"})})};
+
+    VELOX_ASSERT_THROW(
+        assertEqualityDeletes(
+            equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors),
+        "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns");
+  }
+
+  // Test LongDecimal + Varbinary combination (should throw)
+  {
+    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
+    std::unordered_map<int8_t, std::vector<std::vector<std::string>>>
+        equalityDeleteVectorMap;
+    equalityFieldIdsMap.insert({0, {1, 2}});
+    equalityDeleteVectorMap.insert(
+        {0,
+         {{"123456789012345", "987654321098765"}, {"\x01\x02", "\x03\x04"}}});
+
+    auto longDecimalType = DECIMAL(25, 5);
+    std::vector<RowVectorPtr> dataVectors = {makeRowVector(
+        {"c0", "c1"},
+        {makeFlatVector<int128_t>(
+             {int128_t(123456789012345), int128_t(987654321098765)},
+             longDecimalType),
+         makeFlatVector<std::string_view>({"\x01\x02", "\x03\x04"})})};
+
+    VELOX_ASSERT_THROW(
+        assertEqualityDeletes(
+            equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors),
+        "Decimal is not supported for DWRF.");
+  }
 }
 
 // Additional test for VARCHAR with negated binary values (maintaining original
