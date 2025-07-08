@@ -376,18 +376,19 @@ class HiveIcebergTest : public HiveConnectorTestBase {
     const uint64_t splitSize = std::floor((fileSize) / splitCount);
 
     for (int i = 0; i < splitCount; ++i) {
-      splits.emplace_back(std::make_shared<HiveIcebergSplit>(
-          kHiveConnectorId,
-          dataFilePath,
-          fileFormat_,
-          i * splitSize,
-          splitSize,
-          partitionKeys,
-          std::nullopt,
-          customSplitInfo,
-          nullptr,
-          /*cacheable=*/true,
-          deleteFiles));
+      splits.emplace_back(
+          std::make_shared<HiveIcebergSplit>(
+              kHiveConnectorId,
+              dataFilePath,
+              fileFormat_,
+              i * splitSize,
+              splitSize,
+              partitionKeys,
+              std::nullopt,
+              customSplitInfo,
+              nullptr,
+              /*cacheable=*/true,
+              deleteFiles));
     }
 
     return splits;
@@ -1701,6 +1702,1056 @@ TEST_F(HiveIcebergTest, equalityDeletesLongDecimal) {
           "SELECT * FROM tmp WHERE c0 NOT IN (123456789012345, 987654321098765)",
           dataVectors),
       "Decimal is not supported for DWRF.");
+}
+
+// Refactored Equality Deletes Tests with Comprehensive Type Support
+
+// Type tags for different data types
+struct Int8Type {
+  using value_type = int8_t;
+  static constexpr const char* name = "INT8";
+};
+
+struct Int16Type {
+  using value_type = int16_t;
+  static constexpr const char* name = "INT16";
+};
+
+struct Int32Type {
+  using value_type = int32_t;
+  static constexpr const char* name = "INT32";
+};
+
+struct Int64Type {
+  using value_type = int64_t;
+  static constexpr const char* name = "INT64";
+};
+
+struct VarcharType {
+  using value_type = std::string;
+  static constexpr const char* name = "VARCHAR";
+};
+
+struct VarbinaryType {
+  using value_type = std::string;
+  static constexpr const char* name = "VARBINARY";
+};
+
+struct ShortDecimalType {
+  using value_type = int64_t;
+  static constexpr const char* name = "SHORT_DECIMAL";
+  static constexpr int precision = 6;
+  static constexpr int scale = 2;
+};
+
+struct FloatType {
+  using value_type = float;
+  static constexpr const char* name = "FLOAT";
+};
+
+struct DoubleType {
+  using value_type = double;
+  static constexpr const char* name = "DOUBLE";
+};
+
+struct LongDecimalType {
+  using value_type = int128_t;
+  static constexpr const char* name = "LONG_DECIMAL";
+  static constexpr int precision = 25;
+  static constexpr int scale = 5;
+};
+
+// Test data generators for different types
+template <typename T>
+struct TestDataGenerator {
+  static std::vector<typename T::value_type> generateSequentialData(
+      size_t count);
+  static std::vector<typename T::value_type> generateDeleteSubset(
+      const std::vector<typename T::value_type>& data);
+  static std::vector<typename T::value_type> generateNonExistentValues();
+  static std::string makeNotInClause(
+      const std::vector<typename T::value_type>& values,
+      const std::string& columnName);
+};
+
+// Specialization for Int8Type
+template <>
+struct TestDataGenerator<Int8Type> {
+  static std::vector<int8_t> generateSequentialData(size_t count) {
+    std::vector<int8_t> data(count);
+    std::iota(data.begin(), data.end(), 0);
+    return data;
+  }
+
+  static std::vector<int8_t> generateDeleteSubset(
+      const std::vector<int8_t>& data) {
+    return {data[0], data[1], data[2], data[3]};
+  }
+
+  static std::vector<int8_t> generateNonExistentValues() {
+    return {100, 127};
+  }
+
+  static std::string makeNotInClause(
+      const std::vector<int8_t>& values,
+      const std::string& columnName) {
+    if (values.empty())
+      return "";
+    std::string clause = columnName + " NOT IN (";
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (i > 0)
+        clause += ", ";
+      clause += std::to_string(values[i]);
+    }
+    clause += ")";
+    return clause;
+  }
+};
+
+// Specialization for Int16Type
+template <>
+struct TestDataGenerator<Int16Type> {
+  static std::vector<int16_t> generateSequentialData(size_t count) {
+    std::vector<int16_t> data(count);
+    std::iota(data.begin(), data.end(), 0);
+    return data;
+  }
+
+  static std::vector<int16_t> generateDeleteSubset(
+      const std::vector<int16_t>& data) {
+    return {data[0], data[1], data[2], data[3]};
+  }
+
+  static std::vector<int16_t> generateNonExistentValues() {
+    return {20000, 32767};
+  }
+
+  static std::string makeNotInClause(
+      const std::vector<int16_t>& values,
+      const std::string& columnName) {
+    if (values.empty())
+      return "";
+    std::string clause = columnName + " NOT IN (";
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (i > 0)
+        clause += ", ";
+      clause += std::to_string(values[i]);
+    }
+    clause += ")";
+    return clause;
+  }
+};
+
+// Specialization for Int32Type
+template <>
+struct TestDataGenerator<Int32Type> {
+  static std::vector<int32_t> generateSequentialData(size_t count) {
+    std::vector<int32_t> data(count);
+    std::iota(data.begin(), data.end(), 0);
+    return data;
+  }
+
+  static std::vector<int32_t> generateDeleteSubset(
+      const std::vector<int32_t>& data) {
+    return {data[0], data[1], data[2], data[3]};
+  }
+
+  static std::vector<int32_t> generateNonExistentValues() {
+    return {2000000, 2147483647};
+  }
+
+  static std::string makeNotInClause(
+      const std::vector<int32_t>& values,
+      const std::string& columnName) {
+    if (values.empty())
+      return "";
+    std::string clause = columnName + " NOT IN (";
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (i > 0)
+        clause += ", ";
+      clause += std::to_string(values[i]);
+    }
+    clause += ")";
+    return clause;
+  }
+};
+
+// Specialization for Int64Type
+template <>
+struct TestDataGenerator<Int64Type> {
+  static std::vector<int64_t> generateSequentialData(size_t count) {
+    std::vector<int64_t> data(count);
+    std::iota(data.begin(), data.end(), 0);
+    return data;
+  }
+
+  static std::vector<int64_t> generateDeleteSubset(
+      const std::vector<int64_t>& data) {
+    return {data[0], data[1], data[2], data[3]};
+  }
+
+  static std::vector<int64_t> generateNonExistentValues() {
+    return {20000, 29999};
+  }
+
+  static std::string makeNotInClause(
+      const std::vector<int64_t>& values,
+      const std::string& columnName) {
+    if (values.empty())
+      return "";
+    std::string clause = columnName + " NOT IN (";
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (i > 0)
+        clause += ", ";
+      clause += std::to_string(values[i]);
+    }
+    clause += ")";
+    return clause;
+  }
+};
+
+// Specialization for VarcharType
+template <>
+struct TestDataGenerator<VarcharType> {
+  static std::vector<std::string> generateSequentialData(size_t count) {
+    std::vector<std::string> fruits = {
+        "apple", "banana", "cherry", "date", "elderberry"};
+    std::vector<std::string> data;
+    for (size_t i = 0; i < count && i < fruits.size(); ++i) {
+      data.push_back(fruits[i]);
+    }
+    return data;
+  }
+
+  static std::vector<std::string> generateDeleteSubset(
+      const std::vector<std::string>& data) {
+    return {data[0], data[1]};
+  }
+
+  static std::vector<std::string> generateNonExistentValues() {
+    return {"fig", "grape"};
+  }
+
+  static std::string makeNotInClause(
+      const std::vector<std::string>& values,
+      const std::string& columnName) {
+    if (values.empty())
+      return "";
+    std::string clause = columnName + " NOT IN (";
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (i > 0)
+        clause += ", ";
+      clause += "'" + values[i] + "'";
+    }
+    clause += ")";
+    return clause;
+  }
+};
+
+// Specialization for VarbinaryType
+template <>
+struct TestDataGenerator<VarbinaryType> {
+  static std::vector<std::string> generateSequentialData(size_t count) {
+    std::vector<std::string> binaryData = {
+        "\x01\x02", "\x03\x04", "\x05\x06", "\x07\x08", "\x09\x0A"};
+    std::vector<std::string> data;
+    for (size_t i = 0; i < count && i < binaryData.size(); ++i) {
+      data.push_back(binaryData[i]);
+    }
+    return data;
+  }
+
+  static std::vector<std::string> generateDeleteSubset(
+      const std::vector<std::string>& data) {
+    return {data[0], data[1]};
+  }
+
+  static std::vector<std::string> generateNonExistentValues() {
+    return {"\x0B\x0C", "\x0D\x0E"};
+  }
+
+  static std::string makeNotInClause(
+      const std::vector<std::string>& values,
+      const std::string& columnName) {
+    if (values.empty())
+      return "";
+    std::string clause = "hex(" + columnName + ") NOT IN (";
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (i > 0)
+        clause += ", ";
+      clause += "'";
+      for (unsigned char c : values[i]) {
+        clause += fmt::format("{:02X}", c);
+      }
+      clause += "'";
+    }
+    clause += ")";
+    return clause;
+  }
+};
+
+// Specialization for ShortDecimalType
+template <>
+struct TestDataGenerator<ShortDecimalType> {
+  static std::vector<int64_t> generateSequentialData(size_t count) {
+    std::vector<int64_t> data = {
+        123456,
+        789012,
+        345678,
+        901234,
+        567890}; // Represents 1234.56, 7890.12, etc.
+    data.resize(std::min(count, data.size()));
+    return data;
+  }
+
+  static std::vector<int64_t> generateDeleteSubset(
+      const std::vector<int64_t>& data) {
+    return {data[0], data[1]};
+  }
+
+  static std::vector<int64_t> generateNonExistentValues() {
+    return {999999, 111111};
+  }
+
+  static std::string makeNotInClause(
+      const std::vector<int64_t>& values,
+      const std::string& columnName) {
+    if (values.empty())
+      return "";
+    std::string clause = columnName + " NOT IN (";
+    for (size_t i = 0; i < values.size(); ++i) {
+      if (i > 0)
+        clause += ", ";
+      // Convert to decimal representation
+      double decimalValue = static_cast<double>(values[i]) / 100.0;
+      clause += std::to_string(decimalValue);
+    }
+    clause += ")";
+    return clause;
+  }
+};
+
+// Specializations for error-throwing types
+template <>
+struct TestDataGenerator<FloatType> {
+  static std::vector<float> generateSequentialData(size_t count) {
+    return {0.0f, 1.0f, 2.0f, 3.0f, 4.0f};
+  }
+
+  static std::vector<float> generateDeleteSubset(
+      const std::vector<float>& data) {
+    return {data[0], data[1]};
+  }
+
+  static std::vector<float> generateNonExistentValues() {
+    return {100.0f, 200.0f};
+  }
+
+  static std::string makeNotInClause(
+      const std::vector<float>& values,
+      const std::string& columnName) {
+    return ""; // Will throw error before this is called
+  }
+};
+
+template <>
+struct TestDataGenerator<DoubleType> {
+  static std::vector<double> generateSequentialData(size_t count) {
+    return {0.0, 1.0, 2.0, 3.0, 4.0};
+  }
+
+  static std::vector<double> generateDeleteSubset(
+      const std::vector<double>& data) {
+    return {data[0], data[1]};
+  }
+
+  static std::vector<double> generateNonExistentValues() {
+    return {100.0, 200.0};
+  }
+
+  static std::string makeNotInClause(
+      const std::vector<double>& values,
+      const std::string& columnName) {
+    return ""; // Will throw error before this is called
+  }
+};
+
+template <>
+struct TestDataGenerator<LongDecimalType> {
+  static std::vector<int128_t> generateSequentialData(size_t count) {
+    return {
+        int128_t(123456789012345),
+        int128_t(987654321098765),
+        int128_t(111111111111111)};
+  }
+
+  static std::vector<int128_t> generateDeleteSubset(
+      const std::vector<int128_t>& data) {
+    return {data[0], data[1]};
+  }
+
+  static std::vector<int128_t> generateNonExistentValues() {
+    return {int128_t(999999999999999), int128_t(888888888888888)};
+  }
+
+  static std::string makeNotInClause(
+      const std::vector<int128_t>& values,
+      const std::string& columnName) {
+    return ""; // Will throw error before this is called
+  }
+};
+
+class HiveIcebergEqualityDeletesTest : public HiveIcebergTest {
+ public:
+  // Core test scenarios enum
+  enum class TestScenario {
+    DELETE_SUBSET, // Delete a few specific values
+    DELETE_FIRST_LAST, // Delete first and last values
+    DELETE_ALL, // Delete all values (expect empty result)
+    DELETE_NONE, // Delete no values (expect full result)
+    DELETE_NONEXISTENT // Delete values that don't exist
+  };
+
+  // Template for single column equality delete tests
+  template <typename T>
+  void testSingleColumnEqualityDeletes(
+      TestScenario scenario,
+      int32_t fieldId = 1) {
+    using Generator = TestDataGenerator<T>;
+
+    auto dataValues = Generator::generateSequentialData(5);
+    std::vector<typename T::value_type> deleteValues;
+    std::string expectedSql;
+
+    switch (scenario) {
+      case TestScenario::DELETE_SUBSET: {
+        deleteValues = Generator::generateDeleteSubset(dataValues);
+        expectedSql = "SELECT * FROM tmp WHERE " +
+            Generator::makeNotInClause(
+                          deleteValues, fmt::format("c{}", fieldId - 1));
+        break;
+      }
+      case TestScenario::DELETE_FIRST_LAST: {
+        deleteValues = {dataValues.front(), dataValues.back()};
+        expectedSql = "SELECT * FROM tmp WHERE " +
+            Generator::makeNotInClause(
+                          deleteValues, fmt::format("c{}", fieldId - 1));
+        break;
+      }
+      case TestScenario::DELETE_ALL: {
+        deleteValues = dataValues;
+        expectedSql = "SELECT * FROM tmp WHERE 1 = 0";
+        break;
+      }
+      case TestScenario::DELETE_NONE: {
+        deleteValues = {};
+        expectedSql = "SELECT * FROM tmp";
+        break;
+      }
+      case TestScenario::DELETE_NONEXISTENT: {
+        deleteValues = Generator::generateNonExistentValues();
+        expectedSql = "SELECT * FROM tmp WHERE " +
+            Generator::makeNotInClause(
+                          deleteValues, fmt::format("c{}", fieldId - 1));
+        break;
+      }
+    }
+
+    executeSingleColumnTest<T>(fieldId, deleteValues, dataValues, expectedSql);
+  }
+
+  // Template for multi-column equality delete tests
+  template <typename T1, typename T2>
+  void testMultiColumnEqualityDeletes(
+      TestScenario scenario,
+      int32_t fieldId1 = 1,
+      int32_t fieldId2 = 2) {
+    using Generator1 = TestDataGenerator<T1>;
+    using Generator2 = TestDataGenerator<T2>;
+
+    auto dataValues1 = Generator1::generateSequentialData(4);
+    auto dataValues2 = Generator2::generateSequentialData(4);
+
+    std::vector<typename T1::value_type> deleteValues1;
+    std::vector<typename T2::value_type> deleteValues2;
+    std::string expectedSql;
+
+    switch (scenario) {
+      case TestScenario::DELETE_SUBSET: {
+        deleteValues1 = {dataValues1[0], dataValues1[2]};
+        deleteValues2 = {dataValues2[0], dataValues2[2]};
+        expectedSql = buildMultiColumnSql<T1, T2>(
+            deleteValues1, deleteValues2, fieldId1, fieldId2);
+        break;
+      }
+      case TestScenario::DELETE_ALL: {
+        deleteValues1 = dataValues1;
+        deleteValues2 = dataValues2;
+        expectedSql = "SELECT * FROM tmp WHERE 1 = 0";
+        break;
+      }
+      case TestScenario::DELETE_NONE: {
+        deleteValues1 = {};
+        deleteValues2 = {};
+        expectedSql = "SELECT * FROM tmp";
+        break;
+      }
+      default:
+        deleteValues1 = {dataValues1[0]};
+        deleteValues2 = {dataValues2[0]};
+        expectedSql = buildMultiColumnSql<T1, T2>(
+            deleteValues1, deleteValues2, fieldId1, fieldId2);
+        break;
+    }
+
+    executeMultiColumnTest<T1, T2>(
+        fieldId1,
+        fieldId2,
+        deleteValues1,
+        deleteValues2,
+        dataValues1,
+        dataValues2,
+        expectedSql);
+  }
+
+  // Template for error-throwing type tests
+  template <typename T>
+  void testErrorThrowingType() {
+    using Generator = TestDataGenerator<T>;
+
+    auto dataValues = Generator::generateSequentialData(3);
+    auto deleteValues = Generator::generateDeleteSubset(dataValues);
+
+    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
+    equalityFieldIdsMap.insert({0, {1}});
+
+    std::unordered_map<int8_t, std::vector<std::vector<typename T::value_type>>>
+        equalityDeleteVectorMap;
+    equalityDeleteVectorMap.insert({0, {deleteValues}});
+
+    std::vector<RowVectorPtr> dataVectors = createDataVectors<T>(dataValues);
+
+    if constexpr (std::is_same_v<T, FloatType>) {
+      VELOX_ASSERT_THROW(
+          assertEqualityDeletes(
+              equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors),
+          "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : REAL");
+    } else if constexpr (std::is_same_v<T, DoubleType>) {
+      VELOX_ASSERT_THROW(
+          assertEqualityDeletes(
+              equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors),
+          "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : DOUBLE");
+    } else if constexpr (std::is_same_v<T, LongDecimalType>) {
+      VELOX_ASSERT_THROW(
+          assertEqualityDeletes(
+              equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors),
+          "Decimal is not supported for DWRF.");
+    }
+  }
+
+ private:
+  template <typename T>
+  void executeSingleColumnTest(
+      int32_t fieldId,
+      const std::vector<typename T::value_type>& deleteValues,
+      const std::vector<typename T::value_type>& dataValues,
+      const std::string& expectedSql) {
+    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
+    equalityFieldIdsMap.insert({0, {fieldId}});
+
+    std::unordered_map<int8_t, std::vector<std::vector<typename T::value_type>>>
+        equalityDeleteVectorMap;
+    equalityDeleteVectorMap.insert({0, {deleteValues}});
+
+    std::vector<RowVectorPtr> dataVectors = createDataVectors<T>(dataValues);
+
+    assertEqualityDeletes(
+        equalityDeleteVectorMap, equalityFieldIdsMap, expectedSql, dataVectors);
+  }
+
+  template <typename T1, typename T2>
+  void executeMultiColumnTest(
+      int32_t fieldId1,
+      int32_t fieldId2,
+      const std::vector<typename T1::value_type>& deleteValues1,
+      const std::vector<typename T2::value_type>& deleteValues2,
+      const std::vector<typename T1::value_type>& dataValues1,
+      const std::vector<typename T2::value_type>& dataValues2,
+      const std::string& expectedSql) {
+    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
+    equalityFieldIdsMap.insert({0, {fieldId1, fieldId2}});
+
+    std::unordered_map<int8_t, std::vector<std::vector<std::string>>>
+        equalityDeleteVectorMap;
+    std::vector<std::string> strDeleteValues1, strDeleteValues2;
+
+    for (const auto& val : deleteValues1) {
+      strDeleteValues1.push_back(convertToString<T1>(val));
+    }
+    for (const auto& val : deleteValues2) {
+      strDeleteValues2.push_back(convertToString<T2>(val));
+    }
+
+    equalityDeleteVectorMap.insert({0, {strDeleteValues1, strDeleteValues2}});
+
+    std::vector<RowVectorPtr> dataVectors =
+        createMultiColumnDataVectors<T1, T2>(dataValues1, dataValues2);
+
+    assertEqualityDeletes(
+        equalityDeleteVectorMap, equalityFieldIdsMap, expectedSql, dataVectors);
+  }
+
+  template <typename T>
+  std::vector<RowVectorPtr> createDataVectors(
+      const std::vector<typename T::value_type>& values) {
+    if constexpr (std::is_same_v<T, Int8Type>) {
+      return {makeRowVector({"c0"}, {makeFlatVector<int8_t>(values)})};
+    } else if constexpr (std::is_same_v<T, Int16Type>) {
+      return {makeRowVector({"c0"}, {makeFlatVector<int16_t>(values)})};
+    } else if constexpr (std::is_same_v<T, Int32Type>) {
+      return {makeRowVector({"c0"}, {makeFlatVector<int32_t>(values)})};
+    } else if constexpr (std::is_same_v<T, Int64Type>) {
+      return {makeRowVector({"c0"}, {makeFlatVector<int64_t>(values)})};
+    } else if constexpr (std::is_same_v<T, VarcharType>) {
+      return {makeRowVector({"c0"}, {makeFlatVector<std::string>(values)})};
+    } else if constexpr (std::is_same_v<T, VarbinaryType>) {
+      return {makeRowVector(
+          {"c0"},
+          {makeFlatVector<std::string_view>(
+              std::vector<std::string_view>(values.begin(), values.end()))})};
+    } else if constexpr (std::is_same_v<T, ShortDecimalType>) {
+      auto decimalType =
+          DECIMAL(ShortDecimalType::precision, ShortDecimalType::scale);
+      return {makeRowVector(
+          {"c0"}, {makeFlatVector<int64_t>(values, decimalType)})};
+    } else if constexpr (std::is_same_v<T, FloatType>) {
+      return {makeRowVector({"c0"}, {makeFlatVector<float>(values)})};
+    } else if constexpr (std::is_same_v<T, DoubleType>) {
+      return {makeRowVector({"c0"}, {makeFlatVector<double>(values)})};
+    } else if constexpr (std::is_same_v<T, LongDecimalType>) {
+      auto decimalType =
+          DECIMAL(LongDecimalType::precision, LongDecimalType::scale);
+      return {makeRowVector(
+          {"c0"}, {makeFlatVector<int128_t>(values, decimalType)})};
+    } else {
+      return {makeRowVector({"c0"}, {makeFlatVector<std::string>(values)})};
+    }
+  }
+
+  template <typename T1, typename T2>
+  std::vector<RowVectorPtr> createMultiColumnDataVectors(
+      const std::vector<typename T1::value_type>& values1,
+      const std::vector<typename T2::value_type>& values2) {
+    return {makeRowVector(
+        {"c0", "c1"}, {createVector<T1>(values1), createVector<T2>(values2)})};
+  }
+
+  template <typename T>
+  VectorPtr createVector(const std::vector<typename T::value_type>& values) {
+    if constexpr (std::is_same_v<T, Int8Type>) {
+      return makeFlatVector<int8_t>(values);
+    } else if constexpr (std::is_same_v<T, Int16Type>) {
+      return makeFlatVector<int16_t>(values);
+    } else if constexpr (std::is_same_v<T, Int32Type>) {
+      return makeFlatVector<int32_t>(values);
+    } else if constexpr (std::is_same_v<T, Int64Type>) {
+      return makeFlatVector<int64_t>(values);
+    } else if constexpr (std::is_same_v<T, VarcharType>) {
+      return makeFlatVector<std::string>(values);
+    } else if constexpr (std::is_same_v<T, VarbinaryType>) {
+      return makeFlatVector<std::string_view>(
+          std::vector<std::string_view>(values.begin(), values.end()));
+    } else if constexpr (std::is_same_v<T, ShortDecimalType>) {
+      auto decimalType =
+          DECIMAL(ShortDecimalType::precision, ShortDecimalType::scale);
+      return makeFlatVector<int64_t>(values, decimalType);
+    } else {
+      return makeFlatVector<std::string>(values);
+    }
+  }
+
+  template <typename T1, typename T2>
+  std::string buildMultiColumnSql(
+      const std::vector<typename T1::value_type>& deleteValues1,
+      const std::vector<typename T2::value_type>& deleteValues2,
+      int32_t fieldId1,
+      int32_t fieldId2) {
+    if (deleteValues1.empty())
+      return "SELECT * FROM tmp";
+    if (deleteValues1.size() == deleteValues2.size() &&
+        deleteValues1.size() == 4) { // Max data size is 4
+      return "SELECT * FROM tmp WHERE 1 = 0";
+    }
+
+    std::string sql = "SELECT * FROM tmp WHERE ";
+    for (size_t i = 0; i < deleteValues1.size(); ++i) {
+      if (i > 0)
+        sql += " AND ";
+      sql += fmt::format(
+          "(c{} <> {} OR c{} <> {})",
+          fieldId1 - 1,
+          formatValue<T1>(deleteValues1[i]),
+          fieldId2 - 1,
+          formatValue<T2>(deleteValues2[i]));
+    }
+    return sql;
+  }
+
+  template <typename T>
+  std::string convertToString(const typename T::value_type& value) {
+    if constexpr (
+        std::is_same_v<T, VarcharType> || std::is_same_v<T, VarbinaryType>) {
+      return value;
+    } else {
+      return std::to_string(value);
+    }
+  }
+
+  template <typename T>
+  std::string formatValue(const typename T::value_type& value) {
+    if constexpr (
+        std::is_same_v<T, VarcharType> || std::is_same_v<T, VarbinaryType>) {
+      return "'" + value + "'";
+    } else if constexpr (std::is_same_v<T, ShortDecimalType>) {
+      double decimalValue = static_cast<double>(value) / 100.0;
+      return std::to_string(decimalValue);
+    } else {
+      return std::to_string(value);
+    }
+  }
+};
+
+// Parameterized test for single column types
+class SingleColumnEqualityDeleteTest
+    : public HiveIcebergEqualityDeletesTest,
+      public ::testing::WithParamInterface<std::pair<
+          std::string,
+          HiveIcebergEqualityDeletesTest::TestScenario>> {};
+
+// Test parameters for single column tests
+INSTANTIATE_TEST_SUITE_P(
+    AllSingleColumnTypes,
+    SingleColumnEqualityDeleteTest,
+    ::testing::Values(
+        std::make_pair(
+            "Int8_DeleteSubset",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_SUBSET),
+        std::make_pair(
+            "Int8_DeleteFirstLast",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_FIRST_LAST),
+        std::make_pair(
+            "Int8_DeleteAll",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_ALL),
+        std::make_pair(
+            "Int8_DeleteNone",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONE),
+        std::make_pair(
+            "Int8_DeleteNonExistent",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONEXISTENT),
+
+        std::make_pair(
+            "Int16_DeleteSubset",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_SUBSET),
+        std::make_pair(
+            "Int16_DeleteFirstLast",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_FIRST_LAST),
+        std::make_pair(
+            "Int16_DeleteAll",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_ALL),
+        std::make_pair(
+            "Int16_DeleteNone",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONE),
+        std::make_pair(
+            "Int16_DeleteNonExistent",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONEXISTENT),
+
+        std::make_pair(
+            "Int32_DeleteSubset",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_SUBSET),
+        std::make_pair(
+            "Int32_DeleteFirstLast",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_FIRST_LAST),
+        std::make_pair(
+            "Int32_DeleteAll",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_ALL),
+        std::make_pair(
+            "Int32_DeleteNone",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONE),
+        std::make_pair(
+            "Int32_DeleteNonExistent",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONEXISTENT),
+
+        std::make_pair(
+            "Int64_DeleteSubset",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_SUBSET),
+        std::make_pair(
+            "Int64_DeleteFirstLast",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_FIRST_LAST),
+        std::make_pair(
+            "Int64_DeleteAll",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_ALL),
+        std::make_pair(
+            "Int64_DeleteNone",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONE),
+        std::make_pair(
+            "Int64_DeleteNonExistent",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONEXISTENT),
+
+        std::make_pair(
+            "Varchar_DeleteSubset",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_SUBSET),
+        std::make_pair(
+            "Varchar_DeleteFirstLast",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_FIRST_LAST),
+        std::make_pair(
+            "Varchar_DeleteAll",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_ALL),
+        std::make_pair(
+            "Varchar_DeleteNone",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONE),
+        std::make_pair(
+            "Varchar_DeleteNonExistent",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONEXISTENT),
+
+        std::make_pair(
+            "Varbinary_DeleteSubset",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_SUBSET),
+        std::make_pair(
+            "Varbinary_DeleteFirstLast",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_FIRST_LAST),
+        std::make_pair(
+            "Varbinary_DeleteAll",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_ALL),
+        std::make_pair(
+            "Varbinary_DeleteNone",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONE),
+        std::make_pair(
+            "Varbinary_DeleteNonExistent",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONEXISTENT),
+
+        std::make_pair(
+            "ShortDecimal_DeleteSubset",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_SUBSET),
+        std::make_pair(
+            "ShortDecimal_DeleteFirstLast",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_FIRST_LAST),
+        std::make_pair(
+            "ShortDecimal_DeleteAll",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_ALL),
+        std::make_pair(
+            "ShortDecimal_DeleteNone",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONE),
+        std::make_pair(
+            "ShortDecimal_DeleteNonExistent",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONEXISTENT)),
+    [](const ::testing::TestParamInfo<
+        SingleColumnEqualityDeleteTest::ParamType>& info) {
+      return info.param.first;
+    });
+
+TEST_P(SingleColumnEqualityDeleteTest, SingleColumnTests) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  auto [testName, scenario] = GetParam();
+
+  if (testName.find("Int8_") != std::string::npos) {
+    testSingleColumnEqualityDeletes<Int8Type>(scenario);
+  } else if (testName.find("Int16_") != std::string::npos) {
+    testSingleColumnEqualityDeletes<Int16Type>(scenario);
+  } else if (testName.find("Int32_") != std::string::npos) {
+    testSingleColumnEqualityDeletes<Int32Type>(scenario);
+  } else if (testName.find("Int64_") != std::string::npos) {
+    testSingleColumnEqualityDeletes<Int64Type>(scenario);
+  } else if (testName.find("Varchar_") != std::string::npos) {
+    testSingleColumnEqualityDeletes<VarcharType>(scenario);
+  } else if (testName.find("Varbinary_") != std::string::npos) {
+    testSingleColumnEqualityDeletes<VarbinaryType>(scenario);
+  } else if (testName.find("ShortDecimal_") != std::string::npos) {
+    testSingleColumnEqualityDeletes<ShortDecimalType>(scenario);
+  }
+}
+
+// Parameterized test for multi-column types
+class MultiColumnEqualityDeleteTest
+    : public HiveIcebergEqualityDeletesTest,
+      public ::testing::WithParamInterface<std::pair<
+          std::string,
+          HiveIcebergEqualityDeletesTest::TestScenario>> {};
+
+// Test parameters for multi-column tests
+INSTANTIATE_TEST_SUITE_P(
+    AllMultiColumnTypes,
+    MultiColumnEqualityDeleteTest,
+    ::testing::Values(
+        // int8_t + int16_t combinations
+        std::make_pair(
+            "Int8_Int16_DeleteSubset",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_SUBSET),
+        std::make_pair(
+            "Int8_Int16_DeleteAll",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_ALL),
+        std::make_pair(
+            "Int8_Int16_DeleteNone",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONE),
+
+        // int32_t + varchar combinations
+        std::make_pair(
+            "Int32_Varchar_DeleteSubset",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_SUBSET),
+        std::make_pair(
+            "Int32_Varchar_DeleteAll",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_ALL),
+        std::make_pair(
+            "Int32_Varchar_DeleteNone",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONE),
+
+        // int64_t + varbinary combinations
+        std::make_pair(
+            "Int64_Varbinary_DeleteSubset",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_SUBSET),
+        std::make_pair(
+            "Int64_Varbinary_DeleteAll",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_ALL),
+        std::make_pair(
+            "Int64_Varbinary_DeleteNone",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONE),
+
+        // shortDecimal + int32_t combinations
+        std::make_pair(
+            "ShortDecimal_Int32_DeleteSubset",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_SUBSET),
+        std::make_pair(
+            "ShortDecimal_Int32_DeleteAll",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_ALL),
+        std::make_pair(
+            "ShortDecimal_Int32_DeleteNone",
+            HiveIcebergEqualityDeletesTest::TestScenario::DELETE_NONE)),
+    [](const ::testing::TestParamInfo<MultiColumnEqualityDeleteTest::ParamType>&
+           info) { return info.param.first; });
+
+TEST_P(MultiColumnEqualityDeleteTest, MultiColumnTests) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  auto [testName, scenario] = GetParam();
+
+  if (testName.find("Int8_Int16_") != std::string::npos) {
+    testMultiColumnEqualityDeletes<Int8Type, Int16Type>(scenario);
+  } else if (testName.find("Int32_Varchar_") != std::string::npos) {
+    testMultiColumnEqualityDeletes<Int32Type, VarcharType>(scenario);
+  } else if (testName.find("Int64_Varbinary_") != std::string::npos) {
+    testMultiColumnEqualityDeletes<Int64Type, VarbinaryType>(scenario);
+  } else if (testName.find("ShortDecimal_Int32_") != std::string::npos) {
+    testMultiColumnEqualityDeletes<ShortDecimalType, Int32Type>(scenario);
+  }
+}
+
+// Parameterized test for error-throwing types
+class ErrorThrowingTypeTest
+    : public HiveIcebergEqualityDeletesTest,
+      public ::testing::WithParamInterface<std::string> {};
+
+// Test parameters for error-throwing types
+INSTANTIATE_TEST_SUITE_P(
+    AllErrorThrowingTypes,
+    ErrorThrowingTypeTest,
+    ::testing::Values("Float", "Double", "LongDecimal"),
+    [](const ::testing::TestParamInfo<ErrorThrowingTypeTest::ParamType>& info) {
+      return info.param;
+    });
+
+TEST_P(ErrorThrowingTypeTest, ErrorThrowingTests) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  std::string typeName = GetParam();
+
+  if (typeName == "Float") {
+    testErrorThrowingType<FloatType>();
+  } else if (typeName == "Double") {
+    testErrorThrowingType<DoubleType>();
+  } else if (typeName == "LongDecimal") {
+    testErrorThrowingType<LongDecimalType>();
+  }
+}
+
+// Additional specific tests for complex scenarios
+TEST_F(HiveIcebergEqualityDeletesTest, subFieldEqualityDeletes) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  // Test deletes on nested struct fields
+  std::shared_ptr<TempFilePath> dataFilePath = TempFilePath::create();
+  std::vector<RowVectorPtr> dataVectors = {makeRowVector(
+      {"c_bigint", "c_row"},
+      {makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
+       makeRowVector(
+           {"c0", "c1", "c2"},
+           {makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
+            makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
+            makeFlatVector<int64_t>(20, [](auto row) { return row + 1; })})})};
+
+  dataFilePath = writeDataFiles(rowCount, 1, 1, dataVectors)[0];
+
+  std::vector<IcebergDeleteFile> deleteFiles;
+  std::vector<RowVectorPtr> deleteDataVectors = {makeRowVector(
+      {"c1"}, {makeFlatVector<int64_t>(2, [](auto row) { return row + 1; })})};
+
+  auto equalityFieldIds = std::vector<int32_t>({4}); // Schema ID for c_row.c1
+  auto deleteFilePath = TempFilePath::create();
+  writeToFile(deleteFilePath->getPath(), deleteDataVectors.back());
+
+  IcebergDeleteFile deleteFile(
+      FileContent::kEqualityDeletes,
+      deleteFilePath->getPath(),
+      fileFormat_,
+      2,
+      testing::internal::GetFileSize(
+          std::fopen(deleteFilePath->getPath().c_str(), "r")),
+      equalityFieldIds);
+  deleteFiles.push_back(deleteFile);
+
+  auto icebergSplits = makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
+
+  std::string duckDbSql = "SELECT * FROM tmp WHERE c_row.c0 not in (1, 2)";
+  assertEqualityDeletes(
+      icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
+}
+
+TEST_F(HiveIcebergEqualityDeletesTest, multipleDeleteFiles) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  // Test multiple delete files targeting different columns
+  std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
+  std::unordered_map<int8_t, std::vector<std::vector<int64_t>>>
+      equalityDeleteVectorMap;
+
+  // Multiple delete files with different target columns
+  equalityFieldIdsMap.insert({{0, {1}}, {1, {2}}, {2, {3}}});
+  equalityDeleteVectorMap.insert({{0, {{0, 1}}}, {1, {{2, 3}}}, {2, {{4, 5}}}});
+
+  assertEqualityDeletes(equalityDeleteVectorMap, equalityFieldIdsMap);
+}
+
+// Additional test for VARCHAR with negated binary values (maintaining original
+// test)
+TEST_F(HiveIcebergEqualityDeletesTest, varcharWithNegatedBinaryValues) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
+  std::unordered_map<int8_t, std::vector<std::vector<std::string>>>
+      equalityDeleteVectorMap;
+
+  equalityFieldIdsMap.insert({0, {1}});
+  equalityDeleteVectorMap.insert({0, {{"\x01\x02", "\x05\x06"}}});
+
+  std::vector<RowVectorPtr> dataVectors = {makeRowVector(
+      {"c0"},
+      {makeFlatVector<std::string_view>(
+          {"\x01\x02", "\x03\x04", "\x05\x06", "\x07\x08", "\x09\x0A"})})};
+
+  assertEqualityDeletes(
+      equalityDeleteVectorMap,
+      equalityFieldIdsMap,
+      "SELECT * FROM tmp WHERE hex(c0) NOT IN ('0102', '0506')",
+      dataVectors);
 }
 
 } // namespace facebook::velox::connector::hive::iceberg
