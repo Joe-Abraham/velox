@@ -208,7 +208,7 @@ class HiveIcebergTest : public HiveConnectorTestBase {
           IcebergDeleteFile icebergDeleteFile(
               FileContent::kPositionalDeletes,
               deleteFilePath,
-              fileFomat_,
+              fileFormat_,
               deleteFilePaths[deleteFileName].first,
               testing::internal::GetFileSize(
                   std::fopen(deleteFilePath.c_str(), "r")));
@@ -280,7 +280,7 @@ class HiveIcebergTest : public HiveConnectorTestBase {
       IcebergDeleteFile deleteFile(
           FileContent::kEqualityDeletes,
           deleteFilePaths.back()->getPath(),
-          fileFomat_,
+          fileFormat_,
           equalityDeleteVector[0].size(),
           testing::internal::GetFileSize(
               std::fopen(deleteFilePaths.back()->getPath().c_str(), "r")),
@@ -379,7 +379,7 @@ class HiveIcebergTest : public HiveConnectorTestBase {
       splits.emplace_back(std::make_shared<HiveIcebergSplit>(
           kHiveConnectorId,
           dataFilePath,
-          fileFomat_,
+          fileFormat_,
           i * splitSize,
           splitSize,
           partitionKeys,
@@ -703,7 +703,7 @@ class HiveIcebergTest : public HiveConnectorTestBase {
 
  protected:
   RowTypePtr rowType_{ROW({"c0"}, {BIGINT()})};
-  dwio::common::FileFormat fileFomat_{dwio::common::FileFormat::DWRF};
+  dwio::common::FileFormat fileFormat_{dwio::common::FileFormat::DWRF};
 
   template <typename T>
   std::shared_ptr<TempFilePath> writeEqualityDeleteFile(
@@ -1287,7 +1287,7 @@ TEST_F(HiveIcebergTest, TestSubFieldEqualityDelete) {
   IcebergDeleteFile deleteFile(
       FileContent::kEqualityDeletes,
       deleteFilePaths.back()->getPath(),
-      fileFomat_,
+      fileFormat_,
       2,
       testing::internal::GetFileSize(
           std::fopen(deleteFilePaths.back()->getPath().c_str(), "r")),
