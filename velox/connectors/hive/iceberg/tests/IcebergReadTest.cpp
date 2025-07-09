@@ -376,19 +376,18 @@ class HiveIcebergTest : public HiveConnectorTestBase {
     const uint64_t splitSize = std::floor((fileSize) / splitCount);
 
     for (int i = 0; i < splitCount; ++i) {
-      splits.emplace_back(
-          std::make_shared<HiveIcebergSplit>(
-              kHiveConnectorId,
-              dataFilePath,
-              fileFormat_,
-              i * splitSize,
-              splitSize,
-              partitionKeys,
-              std::nullopt,
-              customSplitInfo,
-              nullptr,
-              /*cacheable=*/true,
-              deleteFiles));
+      splits.emplace_back(std::make_shared<HiveIcebergSplit>(
+          kHiveConnectorId,
+          dataFilePath,
+          fileFormat_,
+          i * splitSize,
+          splitSize,
+          partitionKeys,
+          std::nullopt,
+          customSplitInfo,
+          nullptr,
+          /*cacheable=*/true,
+          deleteFiles));
     }
 
     return splits;
@@ -1704,141 +1703,76 @@ TEST_F(HiveIcebergTest, equalityDeletesLongDecimal) {
       "Decimal is not supported for DWRF.");
 }
 
-class TypeTestHelper {
-public:
-  template<typename T>
-  static TypePtr getVeloxType() {
-    if constexpr (std::is_same_v<T, int8_t>) {
-      return TINYINT();
-    } else if constexpr (std::is_same_v<T, int16_t>) {
-      return SMALLINT();
-    } else if constexpr (std::is_same_v<T, int32_t>) {
-      return INTEGER();
-    } else if constexpr (std::is_same_v<T, int64_t>) {
-      return BIGINT();
-    } else if constexpr (std::is_same_v<T, float>) {
-      return REAL();
-    } else if constexpr (std::is_same_v<T, double>) {
-      return DOUBLE();
-    } else if constexpr (std::is_same_v<T, std::string>) {
-      return VARCHAR();
-    } else {
-      return VARCHAR(); // Default fallback
-    }
-  }
-
-  static TypePtr getShortDecimalType() {
-    return DECIMAL(6, 2); // Short decimal with precision 6, scale 2
-  }
-
-  static TypePtr getLongDecimalType() {
-    return DECIMAL(25, 5); // Long decimal with precision 25, scale 5
-  }
-
-  static TypePtr getVarbinaryType() {
-    return VARBINARY();
-  }
-
-  template<typename T>
-  static std::vector<T> generateTestData(size_t count) {
-    std::vector<T> data;
-    if constexpr (std::is_arithmetic_v<T>) {
-      data.resize(count);
-      std::iota(data.begin(), data.end(), T(0));
-    } else if constexpr (std::is_same_v<T, std::string>) {
-      std::vector<std::string> values = {"apple", "banana", "cherry", "date", "elderberry"};
-      for (size_t i = 0; i < count && i < values.size(); ++i) {
-        data.push_back(values[i]);
-      }
-    }
-    return data;
-  }
-
-  static std::vector<std::string> generateVarbinaryData(size_t count) {
-    std::vector<std::string> data = {
-      "\x01\x02", "\x03\x04", "\x05\x06", "\x07\x08", "\x09\x0A"
-    };
-    data.resize(std::min(count, data.size()));
-    return data;
-  }
-
-  static std::vector<int64_t> generateShortDecimalData(size_t count) {
-    // Values represent DECIMAL(6,2): 123456 = 1234.56, 789012 = 7890.12, etc.
-    std::vector<int64_t> data = {123456, 789012, 345678, 901234, 567890};
-    data.resize(std::min(count, data.size()));
-    return data;
-  }
-
-  static std::vector<int128_t> generateLongDecimalData(size_t count) {
-    // Values represent DECIMAL(25,5)
-    std::vector<int128_t> data = {
-      int128_t(123456789012345), int128_t(987654321098765),
-      int128_t(111111111111111), int128_t(222222222222222),
-      int128_t(333333333333333)
-    };
-    data.resize(std::min(count, data.size()));
-    return data;
-  }
-
-  template<typename T>
-  static std::string formatValueForSql(const T& value) {
-    if constexpr (std::is_same_v<T, std::string>) {
-      return "'" + value + "'";
-    } else {
-      return std::to_string(value);
-    }
-  }
-
-  static std::string formatVarbinaryForSql(const std::string& value) {
-    std::string hex = "hex(c0) NOT IN (";
-    for (size_t i = 0; i < value.size(); ++i) {
-      hex += fmt::format("{:02X}", static_cast<unsigned char>(value[i]));
-    }
-    return hex;
-  }
-
-  static std::string formatDecimalForSql(int64_t value, int scale) {
-    // Convert scaled integer back to decimal string
-    std::string str = std::to_string(value);
-    if (scale > 0 && str.length() > scale) {
-      str.insert(str.length() - scale, ".");
-    }
-    return str;
-  }
+// Test scenarios enum
+enum class TestScenario {
+  DELETE_SUBSET,
+  DELETE_FIRST_LAST,
+  DELETE_ALL,
+  DELETE_NONE,
+  DELETE_NONEXISTENT
 };
 
-class HiveIcebergEqualityDeletesTest : public HiveConnectorTestBase {
-public:
-  HiveIcebergEqualityDeletesTest()
-      : config_{std::make_shared<facebook::velox::dwrf::Config>()} {
-    flushPolicyFactory_ = []() {
-      return std::make_unique<dwrf::LambdaFlushPolicy>([]() { return true; });
-    };
+// Type variant for handling different data types
+using TestDataType = std::variant<
+    std::vector<int8_t>,
+    std::vector<int16_t>,
+    std::vector<int32_t>,
+    std::vector<int64_t>,
+    std::vector<std::string>,
+    std::vector<std::string>, // for varbinary
+    std::vector<int64_t>>; // for short decimal
+
+// Single column parameterized test class
+class HiveIcebergSingleColumnEqualityDeletesTest
+    : public HiveIcebergTest,
+      public testing::WithParamInterface<std::tuple<TestScenario, TypeKind>> {
+ public:
+  void SetUp() override {
+    HiveIcebergTest::SetUp();
   }
 
-  enum class TestScenario {
-    DELETE_SUBSET,
-    DELETE_FIRST_LAST,
-    DELETE_ALL,
-    DELETE_NONE,
-    DELETE_NONEXISTENT
-  };
+  void testSingleColumnByTypeKind(TestScenario scenario, TypeKind typeKind) {
+    switch (typeKind) {
+      case TypeKind::TINYINT:
+        testSingleColumnEqualityDeletes<int8_t>(scenario);
+        break;
+      case TypeKind::SMALLINT:
+        testSingleColumnEqualityDeletes<int16_t>(scenario);
+        break;
+      case TypeKind::INTEGER:
+        testSingleColumnEqualityDeletes<int32_t>(scenario);
+        break;
+      case TypeKind::BIGINT:
+        testSingleColumnEqualityDeletes<int64_t>(scenario);
+        break;
+      case TypeKind::VARCHAR:
+        testSingleColumnEqualityDeletes<std::string>(scenario);
+        break;
+      case TypeKind::VARBINARY:
+        testVarbinaryEqualityDeletes(scenario);
+        break;
+      default:
+        FAIL() << "Unsupported type kind: " << typeKind;
+    }
+  }
 
-  // Single column tests for basic types
-  template<typename T>
-  void testSingleColumnEqualityDeletes(TestScenario scenario, int32_t fieldId = 1) {
-    auto dataValues = TypeTestHelper::generateTestData<T>(5);
+ private:
+  template <typename T>
+  void testSingleColumnEqualityDeletes(
+      TestScenario scenario,
+      int32_t fieldId = 1) {
+    auto dataValues = generateTestData<T>(5);
     std::vector<T> deleteValues;
     std::string expectedSql;
 
     switch (scenario) {
       case TestScenario::DELETE_SUBSET:
         deleteValues = {dataValues[0], dataValues[1]};
-        expectedSql = buildSingleColumnSql<T>(deleteValues, fieldId, false);
+        expectedSql = buildSingleColumnSql<T>(deleteValues, fieldId);
         break;
       case TestScenario::DELETE_FIRST_LAST:
-        deleteValues = {dataValues[0], dataValues[dataValues.size()-1]};
-        expectedSql = buildSingleColumnSql<T>(deleteValues, fieldId, false);
+        deleteValues = {dataValues[0], dataValues.back()};
+        expectedSql = buildSingleColumnSql<T>(deleteValues, fieldId);
         break;
       case TestScenario::DELETE_ALL:
         deleteValues = dataValues;
@@ -1850,20 +1784,21 @@ public:
         break;
       case TestScenario::DELETE_NONEXISTENT:
         if constexpr (std::is_arithmetic_v<T>) {
-          deleteValues = {T(1000), T(2000)};
+          deleteValues = {static_cast<T>(1000), static_cast<T>(2000)};
         } else {
           deleteValues = {"nonexistent1", "nonexistent2"};
         }
-        expectedSql = buildSingleColumnSql<T>(deleteValues, fieldId, false);
+        expectedSql = buildSingleColumnSql<T>(deleteValues, fieldId);
         break;
     }
 
     executeSingleColumnTest<T>(fieldId, deleteValues, dataValues, expectedSql);
   }
 
-  // Specialized varbinary test
-  void testVarbinaryEqualityDeletes(TestScenario scenario, int32_t fieldId = 1) {
-    auto dataValues = TypeTestHelper::generateVarbinaryData(5);
+  void testVarbinaryEqualityDeletes(
+      TestScenario scenario,
+      int32_t fieldId = 1) {
+    auto dataValues = generateVarbinaryData(5);
     std::vector<std::string> deleteValues;
     std::string expectedSql;
 
@@ -1873,7 +1808,7 @@ public:
         expectedSql = buildVarbinarySql(deleteValues, fieldId);
         break;
       case TestScenario::DELETE_FIRST_LAST:
-        deleteValues = {dataValues[0], dataValues[dataValues.size()-1]};
+        deleteValues = {dataValues[0], dataValues.back()};
         expectedSql = buildVarbinarySql(deleteValues, fieldId);
         break;
       case TestScenario::DELETE_ALL:
@@ -1893,9 +1828,165 @@ public:
     executeVarbinaryTest(fieldId, deleteValues, dataValues, expectedSql);
   }
 
-  // Short decimal test
-  void testShortDecimalEqualityDeletes(TestScenario scenario, int32_t fieldId = 1) {
-    auto dataValues = TypeTestHelper::generateShortDecimalData(5);
+  template <typename T>
+  std::vector<T> generateTestData(size_t count) {
+    std::vector<T> data;
+    if constexpr (std::is_arithmetic_v<T>) {
+      data.reserve(count);
+      for (size_t i = 0; i < count; ++i) {
+        data.push_back(static_cast<T>(i));
+      }
+    } else if constexpr (std::is_same_v<T, std::string>) {
+      const std::vector<std::string> values = {
+          "apple", "banana", "cherry", "date", "elderberry"};
+      data.reserve(std::min(count, values.size()));
+      for (size_t i = 0; i < count && i < values.size(); ++i) {
+        data.push_back(values[i]);
+      }
+    }
+    return data;
+  }
+
+  std::vector<std::string> generateVarbinaryData(size_t count) {
+    const std::vector<std::string> values = {
+        "\x01\x02", "\x03\x04", "\x05\x06", "\x07\x08", "\x09\x0A"};
+    std::vector<std::string> data;
+    data.reserve(std::min(count, values.size()));
+    for (size_t i = 0; i < count && i < values.size(); ++i) {
+      data.push_back(values[i]);
+    }
+    return data;
+  }
+
+  template <typename T>
+  std::string buildSingleColumnSql(
+      const std::vector<T>& deleteValues,
+      int32_t fieldId) {
+    if (deleteValues.empty()) {
+      return "SELECT * FROM tmp";
+    }
+
+    std::string columnName = fmt::format("c{}", fieldId - 1);
+    std::string notInClause = columnName + " NOT IN (";
+
+    for (size_t i = 0; i < deleteValues.size(); ++i) {
+      if (i > 0)
+        notInClause += ", ";
+      if constexpr (std::is_same_v<T, std::string>) {
+        notInClause += "'" + deleteValues[i] + "'";
+      } else {
+        notInClause += std::to_string(deleteValues[i]);
+      }
+    }
+    notInClause += ")";
+
+    return "SELECT * FROM tmp WHERE " + notInClause;
+  }
+
+  std::string buildVarbinarySql(
+      const std::vector<std::string>& deleteValues,
+      int32_t fieldId) {
+    if (deleteValues.empty()) {
+      return "SELECT * FROM tmp";
+    }
+
+    std::string columnName = fmt::format("c{}", fieldId - 1);
+    std::string notInClause = "hex(" + columnName + ") NOT IN (";
+
+    for (size_t i = 0; i < deleteValues.size(); ++i) {
+      if (i > 0)
+        notInClause += ", ";
+      notInClause += "'";
+      for (unsigned char c : deleteValues[i]) {
+        notInClause += fmt::format("{:02X}", c);
+      }
+      notInClause += "'";
+    }
+    notInClause += ")";
+
+    return "SELECT * FROM tmp WHERE " + notInClause;
+  }
+
+  template <typename T>
+  void executeSingleColumnTest(
+      int32_t fieldId,
+      const std::vector<T>& deleteValues,
+      const std::vector<T>& dataValues,
+      const std::string& expectedSql) {
+    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
+    equalityFieldIdsMap.insert({0, {fieldId}});
+
+    std::unordered_map<int8_t, std::vector<std::vector<T>>>
+        equalityDeleteVectorMap;
+    equalityDeleteVectorMap.insert({0, {deleteValues}});
+
+    std::vector<RowVectorPtr> dataVectors = {
+        makeRowVector({"c0"}, {makeFlatVector<T>(dataValues)})};
+
+    assertEqualityDeletes(
+        equalityDeleteVectorMap, equalityFieldIdsMap, expectedSql, dataVectors);
+  }
+
+  void executeVarbinaryTest(
+      int32_t fieldId,
+      const std::vector<std::string>& deleteValues,
+      const std::vector<std::string>& dataValues,
+      const std::string& expectedSql) {
+    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
+    equalityFieldIdsMap.insert({0, {fieldId}});
+
+    std::unordered_map<int8_t, std::vector<std::vector<std::string>>>
+        equalityDeleteVectorMap;
+    equalityDeleteVectorMap.insert({0, {deleteValues}});
+
+    std::vector<RowVectorPtr> dataVectors = {makeRowVector(
+        {"c0"},
+        {makeFlatVector<std::string_view>(dataValues.size(), [&](auto row) {
+          return std::string_view(dataValues[row]);
+        })})};
+
+    assertEqualityDeletes(
+        equalityDeleteVectorMap, equalityFieldIdsMap, expectedSql, dataVectors);
+  }
+};
+
+// Test single column equality deletes
+TEST_P(
+    HiveIcebergSingleColumnEqualityDeletesTest,
+    SingleColumnEqualityDeletes) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  auto [scenario, typeKind] = GetParam();
+  testSingleColumnByTypeKind(scenario, typeKind);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    SingleColumnTests,
+    HiveIcebergSingleColumnEqualityDeletesTest,
+    testing::Combine(
+        testing::Values(
+            TestScenario::DELETE_SUBSET,
+            TestScenario::DELETE_FIRST_LAST,
+            TestScenario::DELETE_ALL,
+            TestScenario::DELETE_NONE,
+            TestScenario::DELETE_NONEXISTENT),
+        testing::Values(
+            TypeKind::TINYINT,
+            TypeKind::SMALLINT,
+            TypeKind::INTEGER,
+            TypeKind::BIGINT,
+            TypeKind::VARCHAR,
+            TypeKind::VARBINARY)));
+
+// Short decimal single column test class
+class HiveIcebergShortDecimalEqualityDeletesTest
+    : public HiveIcebergTest,
+      public testing::WithParamInterface<TestScenario> {
+ public:
+  void testShortDecimalEqualityDeletes(
+      TestScenario scenario,
+      int32_t fieldId = 1) {
+    auto dataValues = generateShortDecimalData(5);
     std::vector<int64_t> deleteValues;
     std::string expectedSql;
 
@@ -1905,7 +1996,7 @@ public:
         expectedSql = buildShortDecimalSql(deleteValues, fieldId);
         break;
       case TestScenario::DELETE_FIRST_LAST:
-        deleteValues = {dataValues[0], dataValues[dataValues.size()-1]};
+        deleteValues = {dataValues[0], dataValues.back()};
         expectedSql = buildShortDecimalSql(deleteValues, fieldId);
         break;
       case TestScenario::DELETE_ALL:
@@ -1925,208 +2016,44 @@ public:
     executeShortDecimalTest(fieldId, deleteValues, dataValues, expectedSql);
   }
 
-  // Multi-column tests
-  template<typename T1, typename T2>
-  void testMultiColumnEqualityDeletes(TestScenario scenario, int32_t fieldId1 = 1, int32_t fieldId2 = 2) {
-    auto dataValues1 = TypeTestHelper::generateTestData<T1>(4);
-    auto dataValues2 = TypeTestHelper::generateTestData<T2>(4);
+ private:
+  std::vector<int64_t> generateShortDecimalData(size_t count) {
+    const std::vector<int64_t> values = {
+        123456, 789012, 345678, 901234, 567890};
+    std::vector<int64_t> data;
+    data.reserve(std::min(count, values.size()));
+    for (size_t i = 0; i < count && i < values.size(); ++i) {
+      data.push_back(values[i]);
+    }
+    return data;
+  }
 
-    std::vector<T1> deleteValues1;
-    std::vector<T2> deleteValues2;
-    std::string expectedSql;
-
-    switch (scenario) {
-      case TestScenario::DELETE_SUBSET:
-        deleteValues1 = {dataValues1[0], dataValues1[1]};
-        deleteValues2 = {dataValues2[0], dataValues2[1]};
-        expectedSql = buildMultiColumnSql<T1, T2>(deleteValues1, deleteValues2, fieldId1, fieldId2);
-        break;
-      case TestScenario::DELETE_FIRST_LAST:
-        deleteValues1 = {dataValues1[0], dataValues1[dataValues1.size()-1]};
-        deleteValues2 = {dataValues2[0], dataValues2[dataValues2.size()-1]};
-        expectedSql = buildMultiColumnSql<T1, T2>(deleteValues1, deleteValues2, fieldId1, fieldId2);
-        break;
-      case TestScenario::DELETE_ALL:
-        deleteValues1 = dataValues1;
-        deleteValues2 = dataValues2;
-        expectedSql = "SELECT * FROM tmp WHERE 1 = 0";
-        break;
-      case TestScenario::DELETE_NONE:
-        deleteValues1 = {};
-        deleteValues2 = {};
-        expectedSql = "SELECT * FROM tmp";
-        break;
-      case TestScenario::DELETE_NONEXISTENT:
-        if constexpr (std::is_arithmetic_v<T1>) {
-          deleteValues1 = {T1(1000), T1(2000)};
-        } else {
-          deleteValues1 = {"nonexistent1", "nonexistent2"};
-        }
-        if constexpr (std::is_arithmetic_v<T2>) {
-          deleteValues2 = {T2(1000), T2(2000)};
-        } else {
-          deleteValues2 = {"nonexistent1", "nonexistent2"};
-        }
-        expectedSql = buildMultiColumnSql<T1, T2>(deleteValues1, deleteValues2, fieldId1, fieldId2);
-        break;
+  std::string buildShortDecimalSql(
+      const std::vector<int64_t>& deleteValues,
+      int32_t fieldId) {
+    if (deleteValues.empty()) {
+      return "SELECT * FROM tmp";
     }
 
-    executeMultiColumnTest<T1, T2>(fieldId1, fieldId2, deleteValues1, deleteValues2,
-                                   dataValues1, dataValues2, expectedSql);
-  }
+    std::string columnName = fmt::format("c{}", fieldId - 1);
+    std::string notInClause = columnName + " NOT IN (";
 
-  // Special multi-column tests with varbinary
-  void testMultiColumnWithVarbinaryEqualityDeletes(TestScenario scenario, bool varbinaryFirst = true) {
-    auto varbinaryValues = TypeTestHelper::generateVarbinaryData(4);
-    auto intValues = TypeTestHelper::generateTestData<int64_t>(4);
-
-    std::vector<std::string> deleteVarbinaryValues;
-    std::vector<int64_t> deleteIntValues;
-    std::string expectedSql;
-
-    switch (scenario) {
-      case TestScenario::DELETE_SUBSET:
-        deleteVarbinaryValues = {varbinaryValues[0], varbinaryValues[1]};
-        deleteIntValues = {intValues[0], intValues[1]};
-        expectedSql = buildMultiColumnVarbinarySql(deleteVarbinaryValues, deleteIntValues, varbinaryFirst);
-        break;
-      case TestScenario::DELETE_ALL:
-        deleteVarbinaryValues = varbinaryValues;
-        deleteIntValues = intValues;
-        expectedSql = "SELECT * FROM tmp WHERE 1 = 0";
-        break;
-      case TestScenario::DELETE_NONE:
-        deleteVarbinaryValues = {};
-        deleteIntValues = {};
-        expectedSql = "SELECT * FROM tmp";
-        break;
-      default:
-        deleteVarbinaryValues = {varbinaryValues[0]};
-        deleteIntValues = {intValues[0]};
-        expectedSql = buildMultiColumnVarbinarySql(deleteVarbinaryValues, deleteIntValues, varbinaryFirst);
-        break;
+    for (size_t i = 0; i < deleteValues.size(); ++i) {
+      if (i > 0)
+        notInClause += ", ";
+      // Format as decimal with scale 2
+      std::string decimalStr = std::to_string(deleteValues[i]);
+      if (decimalStr.length() > 2) {
+        decimalStr.insert(decimalStr.length() - 2, ".");
+      } else {
+        decimalStr =
+            "0." + std::string(2 - decimalStr.length(), '0') + decimalStr;
+      }
+      notInClause += decimalStr;
     }
+    notInClause += ")";
 
-    executeMultiColumnVarbinaryTest(deleteVarbinaryValues, deleteIntValues,
-                                   varbinaryValues, intValues, expectedSql, varbinaryFirst);
-  }
-
-  // Special multi-column test with short decimal
-  void testShortDecimalWithIntEqualityDeletes(TestScenario scenario) {
-    auto decimalValues = TypeTestHelper::generateShortDecimalData(4);
-    auto intValues = TypeTestHelper::generateTestData<int32_t>(4);
-
-    std::vector<int64_t> deleteDecimalValues;
-    std::vector<int32_t> deleteIntValues;
-    std::string expectedSql;
-
-    switch (scenario) {
-      case TestScenario::DELETE_SUBSET:
-        deleteDecimalValues = {decimalValues[0], decimalValues[1]};
-        deleteIntValues = {intValues[0], intValues[1]};
-        expectedSql = buildShortDecimalIntSql(deleteDecimalValues, deleteIntValues);
-        break;
-      case TestScenario::DELETE_ALL:
-        deleteDecimalValues = decimalValues;
-        deleteIntValues = intValues;
-        expectedSql = "SELECT * FROM tmp WHERE 1 = 0";
-        break;
-      case TestScenario::DELETE_NONE:
-        deleteDecimalValues = {};
-        deleteIntValues = {};
-        expectedSql = "SELECT * FROM tmp";
-        break;
-      default:
-        deleteDecimalValues = {decimalValues[0]};
-        deleteIntValues = {intValues[0]};
-        expectedSql = buildShortDecimalIntSql(deleteDecimalValues, deleteIntValues);
-        break;
-    }
-
-    executeShortDecimalIntTest(deleteDecimalValues, deleteIntValues,
-                              decimalValues, intValues, expectedSql);
-  }
-
-  // Error-throwing type tests
-  template<typename T>
-  void testErrorThrowingType() {
-    auto dataValues = TypeTestHelper::generateTestData<T>(3);
-    std::vector<T> deleteValues = {dataValues[0], dataValues[1]};
-
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    equalityFieldIdsMap.insert({0, {1}});
-
-    std::unordered_map<int8_t, std::vector<std::vector<T>>> equalityDeleteVectorMap;
-    equalityDeleteVectorMap.insert({0, {deleteValues}});
-
-    std::vector<RowVectorPtr> dataVectors = createDataVectors<T>(dataValues);
-
-    if constexpr (std::is_same_v<T, float>) {
-      VELOX_ASSERT_THROW(
-          assertEqualityDeletes(equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors),
-          "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : REAL");
-    } else if constexpr (std::is_same_v<T, double>) {
-      VELOX_ASSERT_THROW(
-          assertEqualityDeletes(equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors),
-          "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : DOUBLE");
-    }
-  }
-
-  void testLongDecimalErrorThrowingType() {
-    auto dataValues = TypeTestHelper::generateLongDecimalData(3);
-    std::vector<int128_t> deleteValues = {dataValues[0], dataValues[1]};
-
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    equalityFieldIdsMap.insert({0, {1}});
-
-    std::unordered_map<int8_t, std::vector<std::vector<int128_t>>> equalityDeleteVectorMap;
-    equalityDeleteVectorMap.insert({0, {deleteValues}});
-
-    std::vector<RowVectorPtr> dataVectors = createLongDecimalDataVectors(dataValues);
-
-    VELOX_ASSERT_THROW(
-        assertEqualityDeletes(equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors),
-        "Decimal is not supported for DWRF.");
-  }
-
-private:
-  std::shared_ptr<dwrf::Config> config_;
-  std::function<std::unique_ptr<dwrf::DWRFFlushPolicy>()> flushPolicyFactory_;
-
-  // Test execution methods
-  template<typename T>
-  void executeSingleColumnTest(
-      int32_t fieldId,
-      const std::vector<T>& deleteValues,
-      const std::vector<T>& dataValues,
-      const std::string& expectedSql) {
-
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    equalityFieldIdsMap.insert({0, {fieldId}});
-
-    std::unordered_map<int8_t, std::vector<std::vector<T>>> equalityDeleteVectorMap;
-    equalityDeleteVectorMap.insert({0, {deleteValues}});
-
-    std::vector<RowVectorPtr> dataVectors = createDataVectors<T>(dataValues);
-
-    assertEqualityDeletes(equalityDeleteVectorMap, equalityFieldIdsMap, expectedSql, dataVectors);
-  }
-
-  void executeVarbinaryTest(
-      int32_t fieldId,
-      const std::vector<std::string>& deleteValues,
-      const std::vector<std::string>& dataValues,
-      const std::string& expectedSql) {
-
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    equalityFieldIdsMap.insert({0, {fieldId}});
-
-    std::unordered_map<int8_t, std::vector<std::vector<std::string>>> equalityDeleteVectorMap;
-    equalityDeleteVectorMap.insert({0, {deleteValues}});
-
-    std::vector<RowVectorPtr> dataVectors = createVarbinaryDataVectors(dataValues);
-
-    assertEqualityDeletes(equalityDeleteVectorMap, equalityFieldIdsMap, expectedSql, dataVectors);
+    return "SELECT * FROM tmp WHERE " + notInClause;
   }
 
   void executeShortDecimalTest(
@@ -2134,559 +2061,39 @@ private:
       const std::vector<int64_t>& deleteValues,
       const std::vector<int64_t>& dataValues,
       const std::string& expectedSql) {
-
     std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
     equalityFieldIdsMap.insert({0, {fieldId}});
 
-    std::unordered_map<int8_t, std::vector<std::vector<int64_t>>> equalityDeleteVectorMap;
+    std::unordered_map<int8_t, std::vector<std::vector<int64_t>>>
+        equalityDeleteVectorMap;
     equalityDeleteVectorMap.insert({0, {deleteValues}});
 
-    std::vector<RowVectorPtr> dataVectors = createShortDecimalDataVectors(dataValues);
+    auto decimalType = DECIMAL(6, 2);
+    std::vector<RowVectorPtr> dataVectors = {makeRowVector(
+        {"c0"}, {makeFlatVector<int64_t>(dataValues, decimalType)})};
 
-    assertEqualityDeletes(equalityDeleteVectorMap, equalityFieldIdsMap, expectedSql, dataVectors);
-  }
-
-  template<typename T1, typename T2>
-  void executeMultiColumnTest(
-      int32_t fieldId1, int32_t fieldId2,
-      const std::vector<T1>& deleteValues1, const std::vector<T2>& deleteValues2,
-      const std::vector<T1>& dataValues1, const std::vector<T2>& dataValues2,
-      const std::string& expectedSql) {
-
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    equalityFieldIdsMap.insert({0, {fieldId1, fieldId2}});
-
-    // Convert to string vectors as expected by the test framework
-    std::unordered_map<int8_t, std::vector<std::vector<std::string>>> equalityDeleteVectorMap;
-    std::vector<std::string> strDeleteValues1, strDeleteValues2;
-
-    for (const auto& val : deleteValues1) {
-      if constexpr (std::is_same_v<T1, std::string>) {
-        strDeleteValues1.push_back(val);
-      } else {
-        strDeleteValues1.push_back(std::to_string(val));
-      }
-    }
-    for (const auto& val : deleteValues2) {
-      if constexpr (std::is_same_v<T2, std::string>) {
-        strDeleteValues2.push_back(val);
-      } else {
-        strDeleteValues2.push_back(std::to_string(val));
-      }
-    }
-
-    equalityDeleteVectorMap.insert({0, {strDeleteValues1, strDeleteValues2}});
-
-    std::vector<RowVectorPtr> dataVectors = createMultiColumnDataVectors<T1, T2>(dataValues1, dataValues2);
-
-    assertEqualityDeletes(equalityDeleteVectorMap, equalityFieldIdsMap, expectedSql, dataVectors);
-  }
-
-  void executeMultiColumnVarbinaryTest(
-      const std::vector<std::string>& deleteVarbinaryValues,
-      const std::vector<int64_t>& deleteIntValues,
-      const std::vector<std::string>& dataVarbinaryValues,
-      const std::vector<int64_t>& dataIntValues,
-      const std::string& expectedSql,
-      bool varbinaryFirst) {
-
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    equalityFieldIdsMap.insert({0, {1, 2}});
-
-    std::unordered_map<int8_t, std::vector<std::vector<std::string>>> equalityDeleteVectorMap;
-    std::vector<std::string> strDeleteIntValues;
-    for (const auto& val : deleteIntValues) {
-      strDeleteIntValues.push_back(std::to_string(val));
-    }
-
-    if (varbinaryFirst) {
-      equalityDeleteVectorMap.insert({0, {deleteVarbinaryValues, strDeleteIntValues}});
-    } else {
-      equalityDeleteVectorMap.insert({0, {strDeleteIntValues, deleteVarbinaryValues}});
-    }
-
-    std::vector<RowVectorPtr> dataVectors = createMultiColumnVarbinaryDataVectors(
-        dataVarbinaryValues, dataIntValues, varbinaryFirst);
-
-    assertEqualityDeletes(equalityDeleteVectorMap, equalityFieldIdsMap, expectedSql, dataVectors);
-  }
-
-  void executeShortDecimalIntTest(
-      const std::vector<int64_t>& deleteDecimalValues,
-      const std::vector<int32_t>& deleteIntValues,
-      const std::vector<int64_t>& dataDecimalValues,
-      const std::vector<int32_t>& dataIntValues,
-      const std::string& expectedSql) {
-
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    equalityFieldIdsMap.insert({0, {1, 2}});
-
-    std::unordered_map<int8_t, std::vector<std::vector<std::string>>> equalityDeleteVectorMap;
-    std::vector<std::string> strDeleteDecimalValues, strDeleteIntValues;
-
-    for (const auto& val : deleteDecimalValues) {
-      strDeleteDecimalValues.push_back(std::to_string(val));
-    }
-    for (const auto& val : deleteIntValues) {
-      strDeleteIntValues.push_back(std::to_string(val));
-    }
-
-    equalityDeleteVectorMap.insert({0, {strDeleteDecimalValues, strDeleteIntValues}});
-
-    std::vector<RowVectorPtr> dataVectors = createShortDecimalIntDataVectors(
-        dataDecimalValues, dataIntValues);
-
-    assertEqualityDeletes(equalityDeleteVectorMap, equalityFieldIdsMap, expectedSql, dataVectors);
-  }
-
-  // Data vector creation methods
-  template<typename T>
-  std::vector<RowVectorPtr> createDataVectors(const std::vector<T>& values) {
-    if constexpr (std::is_same_v<T, int8_t>) {
-      return {makeRowVector({"c0"}, {makeFlatVector<int8_t>(values)})};
-    } else if constexpr (std::is_same_v<T, int16_t>) {
-      return {makeRowVector({"c0"}, {makeFlatVector<int16_t>(values)})};
-    } else if constexpr (std::is_same_v<T, int32_t>) {
-      return {makeRowVector({"c0"}, {makeFlatVector<int32_t>(values)})};
-    } else if constexpr (std::is_same_v<T, int64_t>) {
-      return {makeRowVector({"c0"}, {makeFlatVector<int64_t>(values)})};
-    } else if constexpr (std::is_same_v<T, float>) {
-      return {makeRowVector({"c0"}, {makeFlatVector<float>(values)})};
-    } else if constexpr (std::is_same_v<T, double>) {
-      return {makeRowVector({"c0"}, {makeFlatVector<double>(values)})};
-    } else if constexpr (std::is_same_v<T, std::string>) {
-      return {makeRowVector({"c0"}, {makeFlatVector<std::string>(values)})};
-    } else {
-      return {makeRowVector({"c0"}, {makeFlatVector<std::string>(values)})};
-    }
-  }
-
-  std::vector<RowVectorPtr> createVarbinaryDataVectors(const std::vector<std::string>& values) {
-    return {makeRowVector({"c0"}, {makeFlatVector<std::string_view>(
-        values.size(), [&](auto row) { return std::string_view(values[row]); })})};
-  }
-
-  std::vector<RowVectorPtr> createShortDecimalDataVectors(const std::vector<int64_t>& values) {
-    auto decimalType = TypeTestHelper::getShortDecimalType();
-    return {makeRowVector({"c0"}, {makeFlatVector<int64_t>(values, decimalType)})};
-  }
-
-  std::vector<RowVectorPtr> createLongDecimalDataVectors(const std::vector<int128_t>& values) {
-    auto decimalType = TypeTestHelper::getLongDecimalType();
-    return {makeRowVector({"c0"}, {makeFlatVector<int128_t>(values, decimalType)})};
-  }
-
-  template<typename T1, typename T2>
-  std::vector<RowVectorPtr> createMultiColumnDataVectors(
-      const std::vector<T1>& values1, const std::vector<T2>& values2) {
-    return {makeRowVector({"c0", "c1"}, {createVector<T1>(values1), createVector<T2>(values2)})};
-  }
-
-  std::vector<RowVectorPtr> createMultiColumnVarbinaryDataVectors(
-      const std::vector<std::string>& varbinaryValues,
-      const std::vector<int64_t>& intValues,
-      bool varbinaryFirst) {
-    auto varbinaryVector = makeFlatVector<std::string_view>(
-        varbinaryValues.size(), [&](auto row) { return std::string_view(varbinaryValues[row]); });
-    auto intVector = makeFlatVector<int64_t>(intValues);
-
-    if (varbinaryFirst) {
-      return {makeRowVector({"c0", "c1"}, {varbinaryVector, intVector})};
-    } else {
-      return {makeRowVector({"c0", "c1"}, {intVector, varbinaryVector})};
-    }
-  }
-
-  std::vector<RowVectorPtr> createShortDecimalIntDataVectors(
-      const std::vector<int64_t>& decimalValues,
-      const std::vector<int32_t>& intValues) {
-    auto decimalType = TypeTestHelper::getShortDecimalType();
-    return {makeRowVector({"c0", "c1"}, {
-      makeFlatVector<int64_t>(decimalValues, decimalType),
-      makeFlatVector<int32_t>(intValues)
-    })};
-  }
-
-  template<typename T>
-  VectorPtr createVector(const std::vector<T>& values) {
-    if constexpr (std::is_same_v<T, int8_t>) {
-      return makeFlatVector<int8_t>(values);
-    } else if constexpr (std::is_same_v<T, int16_t>) {
-      return makeFlatVector<int16_t>(values);
-    } else if constexpr (std::is_same_v<T, int32_t>) {
-      return makeFlatVector<int32_t>(values);
-    } else if constexpr (std::is_same_v<T, int64_t>) {
-      return makeFlatVector<int64_t>(values);
-    } else if constexpr (std::is_same_v<T, std::string>) {
-      return makeFlatVector<std::string>(values);
-    } else {
-      return makeFlatVector<std::string>(values);
-    }
-  }
-
-  // SQL building methods
-  template<typename T>
-  std::string buildSingleColumnSql(const std::vector<T>& deleteValues, int32_t fieldId, bool isVarbinary = false) {
-    if (deleteValues.empty()) {
-      return "SELECT * FROM tmp";
-    }
-
-    std::string columnName = fmt::format("c{}", fieldId - 1);
-    std::string notInClause = columnName + " NOT IN (";
-
-    for (size_t i = 0; i < deleteValues.size(); ++i) {
-      if (i > 0) notInClause += ", ";
-      notInClause += TypeTestHelper::formatValueForSql(deleteValues[i]);
-    }
-    notInClause += ")";
-
-    return "SELECT * FROM tmp WHERE " + notInClause;
-  }
-
-  std::string buildVarbinarySql(const std::vector<std::string>& deleteValues, int32_t fieldId) {
-    if (deleteValues.empty()) {
-      return "SELECT * FROM tmp";
-    }
-
-    std::string columnName = fmt::format("c{}", fieldId - 1);
-    std::string notInClause = "hex(" + columnName + ") NOT IN (";
-
-    for (size_t i = 0; i < deleteValues.size(); ++i) {
-      if (i > 0) notInClause += ", ";
-      notInClause += "'";
-      for (unsigned char c : deleteValues[i]) {
-        notInClause += fmt::format("{:02X}", c);
-      }
-      notInClause += "'";
-    }
-    notInClause += ")";
-
-    return "SELECT * FROM tmp WHERE " + notInClause;
-  }
-
-  std::string buildShortDecimalSql(const std::vector<int64_t>& deleteValues, int32_t fieldId) {
-    if (deleteValues.empty()) {
-      return "SELECT * FROM tmp";
-    }
-
-    std::string columnName = fmt::format("c{}", fieldId - 1);
-    std::string notInClause = columnName + " NOT IN (";
-
-    for (size_t i = 0; i < deleteValues.size(); ++i) {
-      if (i > 0) notInClause += ", ";
-      notInClause += TypeTestHelper::formatDecimalForSql(deleteValues[i], 2);
-    }
-    notInClause += ")";
-
-    return "SELECT * FROM tmp WHERE " + notInClause;
-  }
-
-  template<typename T1, typename T2>
-  std::string buildMultiColumnSql(
-      const std::vector<T1>& deleteValues1, const std::vector<T2>& deleteValues2,
-      int32_t fieldId1, int32_t fieldId2) {
-    if (deleteValues1.empty() || deleteValues2.empty()) {
-      return "SELECT * FROM tmp";
-    }
-
-    std::string sql = "SELECT * FROM tmp WHERE ";
-    for (size_t i = 0; i < deleteValues1.size() && i < deleteValues2.size(); ++i) {
-      if (i > 0) sql += " AND ";
-      sql += fmt::format("(c{} <> {} OR c{} <> {})",
-                        fieldId1 - 1, TypeTestHelper::formatValueForSql(deleteValues1[i]),
-                        fieldId2 - 1, TypeTestHelper::formatValueForSql(deleteValues2[i]));
-    }
-    return sql;
-  }
-
-  std::string buildMultiColumnVarbinarySql(
-      const std::vector<std::string>& deleteVarbinaryValues,
-      const std::vector<int64_t>& deleteIntValues,
-      bool varbinaryFirst) {
-    if (deleteVarbinaryValues.empty() || deleteIntValues.empty()) {
-      return "SELECT * FROM tmp";
-    }
-
-    std::string sql = "SELECT * FROM tmp WHERE ";
-    for (size_t i = 0; i < deleteVarbinaryValues.size() && i < deleteIntValues.size(); ++i) {
-      if (i > 0) sql += " AND ";
-
-      if (varbinaryFirst) {
-        sql += "(hex(c0) <> '";
-        for (unsigned char c : deleteVarbinaryValues[i]) {
-          sql += fmt::format("{:02X}", c);
-        }
-        sql += fmt::format("' OR c1 <> {})", deleteIntValues[i]);
-      } else {
-        sql += fmt::format("(c0 <> {} OR hex(c1) <> '", deleteIntValues[i]);
-        for (unsigned char c : deleteVarbinaryValues[i]) {
-          sql += fmt::format("{:02X}", c);
-        }
-        sql += "')";
-      }
-    }
-    return sql;
-  }
-
-  std::string buildShortDecimalIntSql(
-      const std::vector<int64_t>& deleteDecimalValues,
-      const std::vector<int32_t>& deleteIntValues) {
-    if (deleteDecimalValues.empty() || deleteIntValues.empty()) {
-      return "SELECT * FROM tmp";
-    }
-
-    std::string sql = "SELECT * FROM tmp WHERE ";
-    for (size_t i = 0; i < deleteDecimalValues.size() && i < deleteIntValues.size(); ++i) {
-      if (i > 0) sql += " AND ";
-      sql += fmt::format("(c0 <> {} OR c1 <> {})",
-                        TypeTestHelper::formatDecimalForSql(deleteDecimalValues[i], 2),
-                        deleteIntValues[i]);
-    }
-    return sql;
-  }
-
-  // Core assertion method - you'll need to implement this based on your existing test framework
-  template<typename T>
-  void assertEqualityDeletes(
-      const std::unordered_map<int8_t, std::vector<std::vector<T>>>& equalityDeleteVectorMap,
-      const std::unordered_map<int8_t, std::vector<int32_t>>& equalityFieldIdsMap,
-      const std::string& duckDbSql = "",
-      const std::vector<RowVectorPtr>& dataVectors = {}) {
-    // Implementation would depend on your existing test infrastructure
-    // This method should create delete files, splits, and execute the test
-    // Similar to the existing assertEqualityDeletes method in your original code
+    assertEqualityDeletes(
+        equalityDeleteVectorMap, equalityFieldIdsMap, expectedSql, dataVectors);
   }
 };
 
-// Test cases for all requested variants
-
-TEST_F(HiveIcebergEqualityDeletesTest, Int8SingleColumnEqualityDeletes) {
+TEST_P(
+    HiveIcebergShortDecimalEqualityDeletesTest,
+    ShortDecimalSingleColumnEqualityDeletes) {
   folly::SingletonVault::singleton()->registrationComplete();
 
-  testSingleColumnEqualityDeletes<int8_t>(TestScenario::DELETE_SUBSET);
-  testSingleColumnEqualityDeletes<int8_t>(TestScenario::DELETE_FIRST_LAST);
-  testSingleColumnEqualityDeletes<int8_t>(TestScenario::DELETE_ALL);
-  testSingleColumnEqualityDeletes<int8_t>(TestScenario::DELETE_NONE);
-  testSingleColumnEqualityDeletes<int8_t>(TestScenario::DELETE_NONEXISTENT);
+  TestScenario scenario = GetParam();
+  testShortDecimalEqualityDeletes(scenario);
 }
 
-TEST_F(HiveIcebergEqualityDeletesTest, Int16SingleColumnEqualityDeletes) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  testSingleColumnEqualityDeletes<int16_t>(TestScenario::DELETE_SUBSET);
-  testSingleColumnEqualityDeletes<int16_t>(TestScenario::DELETE_FIRST_LAST);
-  testSingleColumnEqualityDeletes<int16_t>(TestScenario::DELETE_ALL);
-  testSingleColumnEqualityDeletes<int16_t>(TestScenario::DELETE_NONE);
-  testSingleColumnEqualityDeletes<int16_t>(TestScenario::DELETE_NONEXISTENT);
-}
-
-TEST_F(HiveIcebergEqualityDeletesTest, Int32SingleColumnEqualityDeletes) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  testSingleColumnEqualityDeletes<int32_t>(TestScenario::DELETE_SUBSET);
-  testSingleColumnEqualityDeletes<int32_t>(TestScenario::DELETE_FIRST_LAST);
-  testSingleColumnEqualityDeletes<int32_t>(TestScenario::DELETE_ALL);
-  testSingleColumnEqualityDeletes<int32_t>(TestScenario::DELETE_NONE);
-  testSingleColumnEqualityDeletes<int32_t>(TestScenario::DELETE_NONEXISTENT);
-}
-
-TEST_F(HiveIcebergEqualityDeletesTest, Int64SingleColumnEqualityDeletes) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  testSingleColumnEqualityDeletes<int64_t>(TestScenario::DELETE_SUBSET);
-  testSingleColumnEqualityDeletes<int64_t>(TestScenario::DELETE_FIRST_LAST);
-  testSingleColumnEqualityDeletes<int64_t>(TestScenario::DELETE_ALL);
-  testSingleColumnEqualityDeletes<int64_t>(TestScenario::DELETE_NONE);
-  testSingleColumnEqualityDeletes<int64_t>(TestScenario::DELETE_NONEXISTENT);
-}
-
-TEST_F(HiveIcebergEqualityDeletesTest, VarcharSingleColumnEqualityDeletes) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  testSingleColumnEqualityDeletes<std::string>(TestScenario::DELETE_SUBSET);
-  testSingleColumnEqualityDeletes<std::string>(TestScenario::DELETE_FIRST_LAST);
-  testSingleColumnEqualityDeletes<std::string>(TestScenario::DELETE_ALL);
-  testSingleColumnEqualityDeletes<std::string>(TestScenario::DELETE_NONE);
-  testSingleColumnEqualityDeletes<std::string>(TestScenario::DELETE_NONEXISTENT);
-}
-
-TEST_F(HiveIcebergEqualityDeletesTest, VarbinarySingleColumnEqualityDeletes) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  testVarbinaryEqualityDeletes(TestScenario::DELETE_SUBSET);
-  testVarbinaryEqualityDeletes(TestScenario::DELETE_FIRST_LAST);
-  testVarbinaryEqualityDeletes(TestScenario::DELETE_ALL);
-  testVarbinaryEqualityDeletes(TestScenario::DELETE_NONE);
-  testVarbinaryEqualityDeletes(TestScenario::DELETE_NONEXISTENT);
-}
-
-TEST_F(HiveIcebergEqualityDeletesTest, ShortDecimalSingleColumnEqualityDeletes) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  testShortDecimalEqualityDeletes(TestScenario::DELETE_SUBSET);
-  testShortDecimalEqualityDeletes(TestScenario::DELETE_FIRST_LAST);
-  testShortDecimalEqualityDeletes(TestScenario::DELETE_ALL);
-  testShortDecimalEqualityDeletes(TestScenario::DELETE_NONE);
-  testShortDecimalEqualityDeletes(TestScenario::DELETE_NONEXISTENT);
-}
-
-// Multi-column tests
-TEST_F(HiveIcebergEqualityDeletesTest, Int8Int16MultiColumnEqualityDeletes) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  testMultiColumnEqualityDeletes<int8_t, int16_t>(TestScenario::DELETE_SUBSET);
-  testMultiColumnEqualityDeletes<int8_t, int16_t>(TestScenario::DELETE_FIRST_LAST);
-  testMultiColumnEqualityDeletes<int8_t, int16_t>(TestScenario::DELETE_ALL);
-  testMultiColumnEqualityDeletes<int8_t, int16_t>(TestScenario::DELETE_NONE);
-  testMultiColumnEqualityDeletes<int8_t, int16_t>(TestScenario::DELETE_NONEXISTENT);
-}
-
-TEST_F(HiveIcebergEqualityDeletesTest, Int32VarcharMultiColumnEqualityDeletes) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  testMultiColumnEqualityDeletes<int32_t, std::string>(TestScenario::DELETE_SUBSET);
-  testMultiColumnEqualityDeletes<int32_t, std::string>(TestScenario::DELETE_FIRST_LAST);
-  testMultiColumnEqualityDeletes<int32_t, std::string>(TestScenario::DELETE_ALL);
-  testMultiColumnEqualityDeletes<int32_t, std::string>(TestScenario::DELETE_NONE);
-  testMultiColumnEqualityDeletes<int32_t, std::string>(TestScenario::DELETE_NONEXISTENT);
-}
-
-TEST_F(HiveIcebergEqualityDeletesTest, Int64VarbinaryMultiColumnEqualityDeletes) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  testMultiColumnWithVarbinaryEqualityDeletes(TestScenario::DELETE_SUBSET, false); // int64 first
-  testMultiColumnWithVarbinaryEqualityDeletes(TestScenario::DELETE_FIRST_LAST, false);
-  testMultiColumnWithVarbinaryEqualityDeletes(TestScenario::DELETE_ALL, false);
-  testMultiColumnWithVarbinaryEqualityDeletes(TestScenario::DELETE_NONE, false);
-}
-
-TEST_F(HiveIcebergEqualityDeletesTest, ShortDecimalInt32MultiColumnEqualityDeletes) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  testShortDecimalWithIntEqualityDeletes(TestScenario::DELETE_SUBSET);
-  testShortDecimalWithIntEqualityDeletes(TestScenario::DELETE_FIRST_LAST);
-  testShortDecimalWithIntEqualityDeletes(TestScenario::DELETE_ALL);
-  testShortDecimalWithIntEqualityDeletes(TestScenario::DELETE_NONE);
-}
-
-// Error throwing type tests
-TEST_F(HiveIcebergEqualityDeletesTest, FloatEqualityDeletesThrowsError) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  // Test all three scenarios for comprehensive coverage
-  testErrorThrowingType<float>();
-
-  // Additional test scenarios for float
-  auto dataValues = TypeTestHelper::generateTestData<float>(5);
-  std::vector<float> deleteValues1 = {dataValues[0], dataValues[2]};
-  std::vector<float> deleteValues2 = {dataValues[1], dataValues[3], dataValues[4]};
-  std::vector<float> deleteValues3 = dataValues; // all values
-
-  std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-  equalityFieldIdsMap.insert({0, {1}});
-
-  // Test scenario 1: subset delete
-  std::unordered_map<int8_t, std::vector<std::vector<float>>> equalityDeleteVectorMap1;
-  equalityDeleteVectorMap1.insert({0, {deleteValues1}});
-  std::vector<RowVectorPtr> dataVectors1 = createDataVectors<float>(dataValues);
-  VELOX_ASSERT_THROW(
-      assertEqualityDeletes(equalityDeleteVectorMap1, equalityFieldIdsMap, "", dataVectors1),
-      "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : REAL");
-
-  // Test scenario 2: different subset
-  std::unordered_map<int8_t, std::vector<std::vector<float>>> equalityDeleteVectorMap2;
-  equalityDeleteVectorMap2.insert({0, {deleteValues2}});
-  std::vector<RowVectorPtr> dataVectors2 = createDataVectors<float>(dataValues);
-  VELOX_ASSERT_THROW(
-      assertEqualityDeletes(equalityDeleteVectorMap2, equalityFieldIdsMap, "", dataVectors2),
-      "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : REAL");
-
-  // Test scenario 3: all values
-  std::unordered_map<int8_t, std::vector<std::vector<float>>> equalityDeleteVectorMap3;
-  equalityDeleteVectorMap3.insert({0, {deleteValues3}});
-  std::vector<RowVectorPtr> dataVectors3 = createDataVectors<float>(dataValues);
-  VELOX_ASSERT_THROW(
-      assertEqualityDeletes(equalityDeleteVectorMap3, equalityFieldIdsMap, "", dataVectors3),
-      "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : REAL");
-}
-
-TEST_F(HiveIcebergEqualityDeletesTest, DoubleEqualityDeletesThrowsError) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  testErrorThrowingType<double>();
-
-  // Additional test scenarios for double
-  auto dataValues = TypeTestHelper::generateTestData<double>(5);
-  std::vector<double> deleteValues1 = {dataValues[0], dataValues[2]};
-  std::vector<double> deleteValues2 = {dataValues[1], dataValues[3], dataValues[4]};
-  std::vector<double> deleteValues3 = dataValues; // all values
-
-  std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-  equalityFieldIdsMap.insert({0, {1}});
-
-  // Test scenario 1: subset delete
-  std::unordered_map<int8_t, std::vector<std::vector<double>>> equalityDeleteVectorMap1;
-  equalityDeleteVectorMap1.insert({0, {deleteValues1}});
-  std::vector<RowVectorPtr> dataVectors1 = createDataVectors<double>(dataValues);
-  VELOX_ASSERT_THROW(
-      assertEqualityDeletes(equalityDeleteVectorMap1, equalityFieldIdsMap, "", dataVectors1),
-      "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : DOUBLE");
-
-  // Test scenario 2: different subset
-  std::unordered_map<int8_t, std::vector<std::vector<double>>> equalityDeleteVectorMap2;
-  equalityDeleteVectorMap2.insert({0, {deleteValues2}});
-  std::vector<RowVectorPtr> dataVectors2 = createDataVectors<double>(dataValues);
-  VELOX_ASSERT_THROW(
-      assertEqualityDeletes(equalityDeleteVectorMap2, equalityFieldIdsMap, "", dataVectors2),
-      "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : DOUBLE");
-
-  // Test scenario 3: all values
-  std::unordered_map<int8_t, std::vector<std::vector<double>>> equalityDeleteVectorMap3;
-  equalityDeleteVectorMap3.insert({0, {deleteValues3}});
-  std::vector<RowVectorPtr> dataVectors3 = createDataVectors<double>(dataValues);
-  VELOX_ASSERT_THROW(
-      assertEqualityDeletes(equalityDeleteVectorMap3, equalityFieldIdsMap, "", dataVectors3),
-      "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : DOUBLE");
-}
-
-TEST_F(HiveIcebergEqualityDeletesTest, LongDecimalEqualityDeletesThrowsError) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  testLongDecimalErrorThrowingType();
-
-  // Additional test scenarios for long decimal
-  auto dataValues = TypeTestHelper::generateLongDecimalData(5);
-  std::vector<int128_t> deleteValues1 = {dataValues[0], dataValues[2]};
-  std::vector<int128_t> deleteValues2 = {dataValues[1], dataValues[3], dataValues[4]};
-  std::vector<int128_t> deleteValues3 = dataValues; // all values
-
-  std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-  equalityFieldIdsMap.insert({0, {1}});
-
-  // Test scenario 1: subset delete
-  std::unordered_map<int8_t, std::vector<std::vector<int128_t>>> equalityDeleteVectorMap1;
-  equalityDeleteVectorMap1.insert({0, {deleteValues1}});
-  std::vector<RowVectorPtr> dataVectors1 = createLongDecimalDataVectors(dataValues);
-  VELOX_ASSERT_THROW(
-      assertEqualityDeletes(equalityDeleteVectorMap1, equalityFieldIdsMap, "", dataVectors1),
-      "Decimal is not supported for DWRF.");
-
-  // Test scenario 2: different subset
-  std::unordered_map<int8_t, std::vector<std::vector<int128_t>>> equalityDeleteVectorMap2;
-  equalityDeleteVectorMap2.insert({0, {deleteValues2}});
-  std::vector<RowVectorPtr> dataVectors2 = createLongDecimalDataVectors(dataValues);
-  VELOX_ASSERT_THROW(
-      assertEqualityDeletes(equalityDeleteVectorMap2, equalityFieldIdsMap, "", dataVectors2),
-      "Decimal is not supported for DWRF.");
-
-  // Test scenario 3: all values
-  std::unordered_map<int8_t, std::vector<std::vector<int128_t>>> equalityDeleteVectorMap3;
-  equalityDeleteVectorMap3.insert({0, {deleteValues3}});
-  std::vector<RowVectorPtr> dataVectors3 = createLongDecimalDataVectors(dataValues);
-  VELOX_ASSERT_THROW(
-      assertEqualityDeletes(equalityDeleteVectorMap3, equalityFieldIdsMap, "", dataVectors3),
-      "Decimal is not supported for DWRF.");
-}
-
+INSTANTIATE_TEST_SUITE_P(
+    ShortDecimalTests,
+    HiveIcebergShortDecimalEqualityDeletesTest,
+    testing::Values(
+        TestScenario::DELETE_SUBSET,
+        TestScenario::DELETE_FIRST_LAST,
+        TestScenario::DELETE_ALL,
+        TestScenario::DELETE_NONE,
+        TestScenario::DELETE_NONEXISTENT));
 
 } // namespace facebook::velox::connector::hive::iceberg
