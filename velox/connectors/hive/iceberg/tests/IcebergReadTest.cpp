@@ -336,27 +336,32 @@ class HiveIcebergTest : public HiveConnectorTestBase {
     }
   }
 
-  std::vector<int64_t> makeSequenceValues(int32_t numRows, int8_t repeat = 1) {
+  template <typename T>
+  std::vector<T> makeSequenceValues(int32_t numRows, int8_t repeat = 1) {
+    VELOX_CHECK(std::is_integral_v<T>, "T must be an integral type, got: {}", typeid(T).name());
     VELOX_CHECK_GT(repeat, 0);
 
     auto maxValue = std::ceil((double)numRows / repeat);
-    std::vector<int64_t> values;
+    std::vector<T> values;
     values.reserve(numRows);
     for (int32_t i = 0; i < maxValue; i++) {
       for (int8_t j = 0; j < repeat; j++) {
-        values.push_back(i);
+        values.push_back(static_cast<T>(i));
       }
     }
     values.resize(numRows);
     return values;
   }
 
-  std::vector<int64_t> makeRandomDeleteValues(int32_t maxRowNumber) {
+  template <typename T>
+  std::vector<T> makeRandomDeleteValues(int32_t maxRowNumber) {
+    VELOX_CHECK(std::is_integral_v<T>, "T must be an integral type, got: {}", typeid(T).name());
+
     std::mt19937 gen{0};
-    std::vector<int64_t> deleteRows;
+    std::vector<T> deleteRows;
     for (int i = 0; i < maxRowNumber; i++) {
       if (folly::Random::rand32(0, 10, gen) > 8) {
-        deleteRows.push_back(i);
+        deleteRows.push_back(static_cast<T>(i));
       }
     }
     return deleteRows;
@@ -927,7 +932,7 @@ class HiveIcebergTest : public HiveConnectorTestBase {
 
           vectors.push_back(stringVector);
         } else if constexpr (KIND == TypeKind::BIGINT) {
-          auto data = makeSequenceValues(rowsPerVector, j + 1);
+          auto data = makeSequenceValues<typename TypeTraits<KIND>::NativeType>(rowsPerVector, j + 1);
           vectors.push_back(vectorMaker_.flatVector<int64_t>(data));
         }
       }
@@ -1238,7 +1243,7 @@ TEST_F(HiveIcebergTest, equalityDeletesSingleFileColumn1) {
 
   // Delete random rows
   equalityDeleteVectorMap.clear();
-  equalityDeleteVectorMap.insert({0, {makeRandomDeleteValues(rowCount)}});
+  equalityDeleteVectorMap.insert({0, {makeRandomDeleteValues<int64_t>(rowCount)}});
   assertEqualityDeletes<TypeKind::BIGINT>(
       equalityDeleteVectorMap, equalityFieldIdsMap);
 
@@ -1249,7 +1254,7 @@ TEST_F(HiveIcebergTest, equalityDeletesSingleFileColumn1) {
       equalityDeleteVectorMap, equalityFieldIdsMap);
 
   // Delete all rows
-  equalityDeleteVectorMap.insert({0, {makeSequenceValues(rowCount)}});
+  equalityDeleteVectorMap.insert({0, {makeSequenceValues<int64_t>(rowCount)}});
   assertEqualityDeletes<TypeKind::BIGINT>(
       equalityDeleteVectorMap, equalityFieldIdsMap);
 
@@ -1298,7 +1303,7 @@ TEST_F(HiveIcebergTest, equalityDeletesSingleFileColumn2) {
 
   // Delete random rows from the second column
   equalityDeleteVectorMap.clear();
-  equalityDeleteVectorMap.insert({0, {makeSequenceValues(rowCount)}});
+  equalityDeleteVectorMap.insert({0, {makeSequenceValues<int64_t>(rowCount)}});
   assertEqualityDeletes<TypeKind::BIGINT>(
       equalityDeleteVectorMap, equalityFieldIdsMap);
 
@@ -1310,7 +1315,7 @@ TEST_F(HiveIcebergTest, equalityDeletesSingleFileColumn2) {
 
   // Delete all values
   equalityDeleteVectorMap.clear();
-  equalityDeleteVectorMap.insert({0, {makeSequenceValues(rowCount / 2)}});
+  equalityDeleteVectorMap.insert({0, {makeSequenceValues<int64_t>(rowCount / 2)}});
   assertEqualityDeletes<TypeKind::BIGINT>(
       equalityDeleteVectorMap, equalityFieldIdsMap);
 }
@@ -1365,7 +1370,7 @@ TEST_F(HiveIcebergTest, equalityDeletesSingleFileMultipleColumns) {
   // Delete all values
   equalityDeleteVectorMap.clear();
   equalityDeleteVectorMap.insert(
-      {0, {makeSequenceValues(rowCount), makeSequenceValues(rowCount, 2)}});
+      {0, {makeSequenceValues<int64_t>(rowCount), makeSequenceValues<int64_t>(rowCount, 2)}});
   assertEqualityDeletes<TypeKind::BIGINT>(
       equalityDeleteVectorMap,
       equalityFieldIdsMap,
@@ -1401,9 +1406,9 @@ TEST_F(HiveIcebergTest, equalityDeletesMultipleFiles) {
   // Delete all values
   equalityDeleteVectorMap.clear();
   equalityDeleteVectorMap.insert(
-      {{0, {makeSequenceValues(rowCount)}},
-       {1, {makeSequenceValues(rowCount)}},
-       {2, {makeSequenceValues(rowCount)}}});
+      {{0, {makeSequenceValues<int64_t>(rowCount)}},
+       {1, {makeSequenceValues<int64_t>(rowCount)}},
+       {2, {makeSequenceValues<int64_t>(rowCount)}}});
   assertEqualityDeletes<TypeKind::BIGINT>(
       equalityDeleteVectorMap,
       equalityFieldIdsMap,
