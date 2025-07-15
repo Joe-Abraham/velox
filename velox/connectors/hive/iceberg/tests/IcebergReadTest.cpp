@@ -267,6 +267,10 @@ class HiveIcebergTest : public HiveConnectorTestBase {
 
     VELOX_CHECK_LE(equalityFieldIdsMap.size(), numDataColumns);
 
+    if (!dataVectors.empty()) {
+      rowType_ = asRowType(dataVectors[0]->type());
+    }
+
     std::shared_ptr<TempFilePath> dataFilePath =
         writeDataFiles<KIND>(rowCount, numDataColumns, 1, dataVectors)[0];
 
@@ -338,10 +342,10 @@ class HiveIcebergTest : public HiveConnectorTestBase {
 
   template <typename T>
   std::vector<T> makeSequenceValues(int32_t numRows, int8_t repeat = 1) {
-    VELOX_CHECK(std::is_integral_v<T>, "T must be an integral type, got: {}", typeid(T).name());
+    static_assert(std::is_integral_v<T>, "T must be an integral type");
     VELOX_CHECK_GT(repeat, 0);
 
-    auto maxValue = std::ceil((double)numRows / repeat);
+    auto maxValue = std::ceil(static_cast<double>(numRows) / repeat);
     std::vector<T> values;
     values.reserve(numRows);
     for (int32_t i = 0; i < maxValue; i++) {
@@ -355,7 +359,10 @@ class HiveIcebergTest : public HiveConnectorTestBase {
 
   template <typename T>
   std::vector<T> makeRandomDeleteValues(int32_t maxRowNumber) {
-    VELOX_CHECK(std::is_integral_v<T>, "T must be an integral type, got: {}", typeid(T).name());
+    VELOX_CHECK(
+        std::is_integral_v<T>,
+        "T must be an integral type, got: {}",
+        typeid(T).name());
 
     std::mt19937 gen{0};
     std::vector<T> deleteRows;
@@ -844,6 +851,9 @@ class HiveIcebergTest : public HiveConnectorTestBase {
         vectors.push_back(vectorMaker_.flatVector(equalityDeleteVector[i]));
       } else if constexpr (KIND == TypeKind::BIGINT) {
         vectors.push_back(makeFlatVector<int64_t>(equalityDeleteVector[i]));
+      } else {
+        vectors.push_back(makeFlatVector<typename TypeTraits<KIND>::NativeType>(
+            equalityDeleteVector[i]));
       }
     }
 
@@ -882,58 +892,101 @@ class HiveIcebergTest : public HiveConnectorTestBase {
   makeVectors(int32_t count, int32_t rowsPerVector, int32_t numColumns = 1) {
     using T = typename TypeTraits<KIND>::NativeType;
 
-    std::vector<TypePtr> types(numColumns, createScalarType<KIND>());
-    std::vector<std::string> names;
-    for (int j = 0; j < numColumns; j++) {
-      names.push_back(fmt::format("c{}", j));
-    }
-
-    // Sample data for VARCHAR
+    // Sample strings for VARCHAR data generation
     const std::vector<std::string> sampleStrings = {
         "apple",     "banana",     "cherry",    "date",       "elderberry",
         "fig",       "grape",      "honeydew",  "kiwi",       "lemon",
         "mango",     "nectarine",  "orange",    "papaya",     "quince",
         "raspberry", "strawberry", "tangerine", "watermelon", "zucchini"};
 
+    std::vector<TypePtr> types;
+    for (int j = 0; j < numColumns; j++) {
+      types.push_back(createScalarType<KIND>());
+    }
+    std::vector<std::string> names;
+    for (int j = 0; j < numColumns; j++) {
+      names.push_back(fmt::format("c{}", j));
+    }
+
     std::vector<RowVectorPtr> rowVectors;
     for (int i = 0; i < count; i++) {
       std::vector<VectorPtr> vectors;
 
-      // Create the column values like below:
-      // c0 c1 c2
-      //  0  0  0
-      //  1  0  0
-      //  2  1  0
-      //  3  1  1
-      //  4  2  1
-      //  5  2  1
-      //  6  3  2
-      // ...
-      // In the first column c0, the values are continuously increasing and
-      // not repeating. In the second column c1, the values are continuously
-      // increasing and each value repeats once. And so on.
       for (int j = 0; j < numColumns; j++) {
         if constexpr (KIND == TypeKind::VARCHAR) {
-          // Generate sequence values
-          auto data = makeSequenceValues(rowsPerVector, j + 1);
-
-          // Allocate FlatVector<StringView>
+          // For VARCHAR, use sample strings with sequence-based indexing
+          auto intData = makeSequenceValues<int64_t>(rowsPerVector, j + 1);
           auto stringVector = BaseVector::create<FlatVector<StringView>>(
               VARCHAR(), rowsPerVector, pool_.get());
 
-          auto* rawStrings = stringVector->mutableRawValues();
-
-          for (int i = 0; i < rowsPerVector; ++i) {
-            std::string str = std::to_string(data[i]);
-
-            // Copy string into buffer and assign StringView
-            stringVector->set(i, StringView(str));
+          for (int idx = 0; idx < rowsPerVector; ++idx) {
+            // Use modulo to cycle through sample strings based on sequence
+            // value
+            auto stringIndex = intData[idx] % sampleStrings.size();
+            const std::string& selectedString = sampleStrings[stringIndex];
+            stringVector->set(idx, StringView(selectedString));
           }
-
           vectors.push_back(stringVector);
-        } else if constexpr (KIND == TypeKind::BIGINT) {
-          auto data = makeSequenceValues<typename TypeTraits<KIND>::NativeType>(rowsPerVector, j + 1);
-          vectors.push_back(vectorMaker_.flatVector<int64_t>(data));
+        } else if constexpr (KIND == TypeKind::VARBINARY) {
+          // For VARBINARY, generate binary data based on sample strings
+          auto intData = makeSequenceValues<int64_t>(rowsPerVector, j + 1);
+          auto binaryVector = BaseVector::create<FlatVector<StringView>>(
+              VARBINARY(), rowsPerVector, pool_.get());
+
+          for (int idx = 0; idx < rowsPerVector; ++idx) {
+            // Use sample string as base for binary data
+            auto stringIndex = intData[idx] % sampleStrings.size();
+            const std::string& baseString = sampleStrings[stringIndex];
+
+            // Create binary data: take first two characters or pad with zeros
+            std::string binaryStr;
+            if (baseString.length() >= 2) {
+              binaryStr = baseString.substr(0, 2);
+            } else if (baseString.length() == 1) {
+              binaryStr = baseString + '\0';
+            } else {
+              binaryStr = "\0\0";
+            }
+            binaryVector->set(idx, StringView(binaryStr));
+          }
+          vectors.push_back(binaryVector);
+        } else if constexpr (KIND == TypeKind::TIMESTAMP) {
+          // For TIMESTAMP, generate timestamps based on sequence
+          auto intData = makeSequenceValues<int64_t>(rowsPerVector, j + 1);
+          std::vector<Timestamp> timestampData;
+          timestampData.reserve(intData.size());
+          for (auto val : intData) {
+            // Create timestamps with seconds based on sequence value
+            timestampData.push_back(Timestamp(val * 1000, 0));
+          }
+          vectors.push_back(vectorMaker_.flatVector<Timestamp>(timestampData));
+        } else if constexpr (KIND == TypeKind::BOOLEAN) {
+          // For BOOLEAN, generate bool values based on sequence
+          auto intData = makeSequenceValues<int64_t>(rowsPerVector, j + 1);
+          std::vector<bool> boolData;
+          boolData.reserve(intData.size());
+          for (auto val : intData) {
+            boolData.push_back(val % 2 == 0);
+          }
+          vectors.push_back(vectorMaker_.flatVector<bool>(boolData));
+        } else if constexpr (std::is_integral_v<T>) {
+          // For all integral types (TINYINT, SMALLINT, INTEGER, BIGINT,
+          // HUGEINT)
+          auto data = makeSequenceValues<typename TypeTraits<KIND>::NativeType>(
+              rowsPerVector, j + 1);
+          vectors.push_back(vectorMaker_.flatVector<T>(data));
+        } else if constexpr (std::is_floating_point_v<T>) {
+          // For floating point types (REAL, DOUBLE)
+          auto intData = makeSequenceValues<int64_t>(rowsPerVector, j + 1);
+          std::vector<T> floatData;
+          floatData.reserve(intData.size());
+          for (auto val : intData) {
+            floatData.push_back(static_cast<T>(val) + 0.5f);
+          }
+          vectors.push_back(vectorMaker_.flatVector<T>(floatData));
+        } else {
+          VELOX_FAIL(
+              "Unsupported type for makeVectors: {}", TypeTraits<KIND>::name);
         }
       }
 
@@ -941,7 +994,6 @@ class HiveIcebergTest : public HiveConnectorTestBase {
     }
 
     rowType_ = std::make_shared<RowType>(std::move(names), std::move(types));
-
     return rowVectors;
   }
 };
@@ -1243,7 +1295,8 @@ TEST_F(HiveIcebergTest, equalityDeletesSingleFileColumn1) {
 
   // Delete random rows
   equalityDeleteVectorMap.clear();
-  equalityDeleteVectorMap.insert({0, {makeRandomDeleteValues<int64_t>(rowCount)}});
+  equalityDeleteVectorMap.insert(
+      {0, {makeRandomDeleteValues<int64_t>(rowCount)}});
   assertEqualityDeletes<TypeKind::BIGINT>(
       equalityDeleteVectorMap, equalityFieldIdsMap);
 
@@ -1315,7 +1368,8 @@ TEST_F(HiveIcebergTest, equalityDeletesSingleFileColumn2) {
 
   // Delete all values
   equalityDeleteVectorMap.clear();
-  equalityDeleteVectorMap.insert({0, {makeSequenceValues<int64_t>(rowCount / 2)}});
+  equalityDeleteVectorMap.insert(
+      {0, {makeSequenceValues<int64_t>(rowCount / 2)}});
   assertEqualityDeletes<TypeKind::BIGINT>(
       equalityDeleteVectorMap, equalityFieldIdsMap);
 }
@@ -1370,7 +1424,9 @@ TEST_F(HiveIcebergTest, equalityDeletesSingleFileMultipleColumns) {
   // Delete all values
   equalityDeleteVectorMap.clear();
   equalityDeleteVectorMap.insert(
-      {0, {makeSequenceValues<int64_t>(rowCount), makeSequenceValues<int64_t>(rowCount, 2)}});
+      {0,
+       {makeSequenceValues<int64_t>(rowCount),
+        makeSequenceValues<int64_t>(rowCount, 2)}});
   assertEqualityDeletes<TypeKind::BIGINT>(
       equalityDeleteVectorMap,
       equalityFieldIdsMap,
@@ -1521,7 +1577,7 @@ TEST_P(EqualityDeletesSingleFileColumn1TypedTest, scenarios) {
       assertEqualityDeletes<TypeKind::VARCHAR>(
           equalityDeleteVectorMap,
           equalityFieldIdsMap,
-          "SELECT * FROM tmp WHERE c0 NOT IN ('0', '4')",
+          "SELECT * FROM tmp WHERE c0 NOT IN ('apple', 'elderberry')",
           dataVectors);
     }
   }
