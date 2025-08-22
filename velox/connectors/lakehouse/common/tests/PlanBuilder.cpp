@@ -14,11 +14,12 @@
  * limitations under the License.
  */
 
-#include "velox/exec/tests/utils/PlanBuilder.h"
-#include "velox/connectors/hive/HiveConnector.h"
-#include "velox/connectors/hive/TableHandle.h"
+#include "velox/connectors/lakehouse/common/tests/PlanBuilder.h"
+
+#include "velox/common/base/Status.h"
+#include "velox/connectors/lakehouse/common/HiveConnector.h"
+#include "velox/connectors/lakehouse/common/TableHandle.h"
 #include "velox/connectors/tpcds/TpcdsConnector.h"
-#include "velox/connectors/tpch/TpchConnector.h"
 #include "velox/core/FilterToExpression.h"
 #include "velox/duckdb/conversion/DuckParser.h"
 #include "velox/exec/Aggregate.h"
@@ -35,10 +36,10 @@
 #include "velox/parse/TypeResolver.h"
 
 using namespace facebook::velox;
-using namespace facebook::velox::connector;
-using namespace facebook::velox::connector::hive;
+using namespace facebook::velox::exec;
+using namespace facebook::velox::connector::lakehouse::common;
 
-namespace facebook::velox::exec::test {
+namespace facebook::velox::connector::lakehouse::common::test {
 namespace {
 
 core::TypedExprPtr parseExpr(
@@ -121,75 +122,6 @@ PlanBuilder& PlanBuilder::tableScanWithPushDown(
       .endTableScan();
 }
 
-PlanBuilder& PlanBuilder::tpchTableScan(
-    tpch::Table table,
-    std::vector<std::string> columnNames,
-    double scaleFactor,
-    std::string_view connectorId,
-    const std::string& filter) {
-  connector::ColumnHandleMap assignmentsMap;
-  std::vector<TypePtr> outputTypes;
-
-  assignmentsMap.reserve(columnNames.size());
-  outputTypes.reserve(columnNames.size());
-
-  for (const auto& columnName : columnNames) {
-    assignmentsMap.emplace(
-        columnName,
-        std::make_shared<connector::tpch::TpchColumnHandle>(columnName));
-    outputTypes.emplace_back(resolveTpchColumn(table, columnName));
-  }
-  auto rowType = ROW(std::move(columnNames), std::move(outputTypes));
-
-  core::TypedExprPtr filterExpression;
-  if (!filter.empty()) {
-    auto expression = parse::parseExpr(filter, options_);
-    filterExpression =
-        core::Expressions::inferTypes(expression, rowType, pool_);
-  }
-
-  auto tableHandle = std::make_shared<connector::tpch::TpchTableHandle>(
-      std::string(connectorId),
-      table,
-      scaleFactor,
-      std::move(filterExpression));
-
-  return TableScanBuilder(*this)
-      .filtersAsNode(filtersAsNode_ ? planNodeIdGenerator_ : nullptr)
-      .outputType(rowType)
-      .tableHandle(tableHandle)
-      .assignments(assignmentsMap)
-      .endTableScan();
-}
-
-PlanBuilder& PlanBuilder::tpcdsTableScan(
-    tpcds::Table table,
-    std::vector<std::string> columnNames,
-    double scaleFactor,
-    std::string_view connectorId) {
-  std::
-      unordered_map<std::string, std::shared_ptr<const connector::ColumnHandle>>
-          assignmentsMap;
-  std::vector<TypePtr> outputTypes;
-
-  assignmentsMap.reserve(columnNames.size());
-  outputTypes.reserve(columnNames.size());
-
-  for (const auto& columnName : columnNames) {
-    assignmentsMap.emplace(
-        columnName,
-        std::make_shared<connector::tpcds::TpcdsColumnHandle>(columnName));
-    outputTypes.emplace_back(resolveTpcdsColumn(table, columnName));
-  }
-  auto rowType = ROW(std::move(columnNames), std::move(outputTypes));
-  return TableScanBuilder(*this)
-      .outputType(rowType)
-      .tableHandle(std::make_shared<connector::tpcds::TpcdsTableHandle>(
-          std::string(connectorId), table, scaleFactor))
-      .assignments(assignmentsMap)
-      .endTableScan();
-}
-
 PlanBuilder::TableScanBuilder& PlanBuilder::TableScanBuilder::subfieldFilters(
     std::vector<std::string> subfieldFilters) {
   VELOX_CHECK(subfieldFiltersMap_.empty());
@@ -214,7 +146,7 @@ PlanBuilder::TableScanBuilder& PlanBuilder::TableScanBuilder::subfieldFilters(
 
     auto it = columnAliases_.find(subfield.toString());
     if (it != columnAliases_.end()) {
-      subfield = common::Subfield(it->second);
+      subfield = velox::common::Subfield(it->second);
     }
     VELOX_CHECK_EQ(
         subfieldFiltersMap_.count(subfield),
@@ -229,7 +161,7 @@ PlanBuilder::TableScanBuilder& PlanBuilder::TableScanBuilder::subfieldFilters(
 
 PlanBuilder::TableScanBuilder&
 PlanBuilder::TableScanBuilder::subfieldFiltersMap(
-    const common::SubfieldFilters& filtersMap) {
+    const velox::common::SubfieldFilters& filtersMap) {
   for (const auto& [k, v] : filtersMap) {
     subfieldFiltersMap_[k.clone()] = v->clone();
   }
@@ -345,7 +277,8 @@ core::PlanNodePtr PlanBuilder::TableWriterBuilder::build(core::PlanNodeId id) {
   // columnHandles, bucketProperty and locationHandle.
   if (!insertHandle_) {
     // Create column handles.
-    std::vector<std::shared_ptr<const connector::hive::HiveColumnHandle>>
+    std::vector<
+        std::shared_ptr<const connector::lakehouse::common::HiveColumnHandle>>
         columnHandles;
     for (auto i = 0; i < outputType->size(); ++i) {
       const auto column = outputType->nameOf(i);
@@ -353,20 +286,22 @@ core::PlanNodePtr PlanBuilder::TableWriterBuilder::build(core::PlanNodeId id) {
           std::find(partitionBy_.begin(), partitionBy_.end(), column) !=
           partitionBy_.end();
       columnHandles.push_back(
-          std::make_shared<connector::hive::HiveColumnHandle>(
+          std::make_shared<connector::lakehouse::common::HiveColumnHandle>(
               column,
-              isPartitionKey
-                  ? connector::hive::HiveColumnHandle::ColumnType::kPartitionKey
-                  : connector::hive::HiveColumnHandle::ColumnType::kRegular,
+              isPartitionKey ? connector::lakehouse::common::HiveColumnHandle::
+                                   ColumnType::kPartitionKey
+                             : connector::lakehouse::common::HiveColumnHandle::
+                                   ColumnType::kRegular,
               outputType->childAt(i),
               outputType->childAt(i)));
     }
 
-    auto locationHandle = std::make_shared<connector::hive::LocationHandle>(
-        outputDirectoryPath_,
-        outputDirectoryPath_,
-        connector::hive::LocationHandle::TableType::kNew,
-        outputFileName_);
+    auto locationHandle =
+        std::make_shared<connector::lakehouse::common::LocationHandle>(
+            outputDirectoryPath_,
+            outputDirectoryPath_,
+            connector::lakehouse::common::LocationHandle::TableType::kNew,
+            outputFileName_);
 
     std::shared_ptr<HiveBucketProperty> bucketProperty;
     if (bucketCount_ != 0) {
@@ -374,15 +309,16 @@ core::PlanNodePtr PlanBuilder::TableWriterBuilder::build(core::PlanNodeId id) {
           outputType, bucketCount_, bucketedBy_, sortBy_);
     }
 
-    auto hiveHandle = std::make_shared<connector::hive::HiveInsertTableHandle>(
-        columnHandles,
-        locationHandle,
-        fileFormat_,
-        bucketProperty,
-        compressionKind_,
-        serdeParameters_,
-        options_,
-        ensureFiles_);
+    auto hiveHandle =
+        std::make_shared<connector::lakehouse::common::HiveInsertTableHandle>(
+            columnHandles,
+            locationHandle,
+            fileFormat_,
+            bucketProperty,
+            compressionKind_,
+            serdeParameters_,
+            options_,
+            ensureFiles_);
 
     insertHandle_ =
         std::make_shared<core::InsertTableHandle>(connectorId_, hiveHandle);
@@ -717,7 +653,7 @@ PlanBuilder& PlanBuilder::tableWrite(
     const std::unordered_map<std::string, std::string>& serdeParameters,
     const std::shared_ptr<dwio::common::WriterOptions>& options,
     const std::string& outputFileName,
-    const common::CompressionKind compressionKind,
+    const velox::common::CompressionKind compressionKind,
     const RowTypePtr& schema,
     const bool ensureFiles,
     const connector::CommitStrategy commitStrategy) {
@@ -830,7 +766,7 @@ core::PlanNodePtr PlanBuilder::createIntermediateOrFinalAggregation(
     }
 
     auto type =
-        resolveAggregateType(name, step, aggregate.rawInputTypes, false);
+        exec::test::resolveAggregateType(name, step, aggregate.rawInputTypes, false);
     std::vector<core::TypedExprPtr> inputs = {field(numGroupingKeys + i)};
 
     // Add lambda inputs.
@@ -931,7 +867,7 @@ PlanBuilder::AggregatesAndNames PlanBuilder::createAggregateExpressionsAndNames(
 
   std::vector<core::AggregationNode::Aggregate> aggs;
 
-  AggregateTypeResolver resolver(step);
+  exec::test::AggregateTypeResolver resolver(step);
   std::vector<std::string> names;
   aggs.reserve(aggregates.size());
   names.reserve(aggregates.size());
@@ -1189,8 +1125,9 @@ PlanBuilder& PlanBuilder::expand(
               dynamic_cast<const core::ConstantExpr*>(untypedExpression.get());
           VELOX_CHECK_NOT_NULL(constantExpr);
           VELOX_CHECK(constantExpr->value().isNull());
-          projectExpr.push_back(std::make_shared<core::ConstantTypedExpr>(
-              expectedType, variant::null(expectedType->kind())));
+          projectExpr.push_back(
+              std::make_shared<core::ConstantTypedExpr>(
+                  expectedType, variant::null(expectedType->kind())));
         }
       }
     }
@@ -1497,7 +1434,7 @@ PlanBuilder& PlanBuilder::localPartition(
 }
 
 PlanBuilder& PlanBuilder::localPartitionByBucket(
-    const std::shared_ptr<connector::hive::HiveBucketProperty>&
+    const std::shared_ptr<connector::lakehouse::common::HiveBucketProperty>&
         bucketProperty) {
   VELOX_CHECK_NOT_NULL(planNode_, "LocalPartition cannot be the source node");
   std::vector<column_index_t> bucketChannels;
@@ -2044,7 +1981,7 @@ std::string throwWindowFunctionSignatureNotSupported(
     const std::vector<FunctionSignaturePtr>& signatures) {
   std::stringstream error;
   error << "Window function signature is not supported: "
-        << toString(name, types)
+        << exec::toString(name, types)
         << ". Supported signatures: " << toString(signatures) << ".";
   VELOX_USER_FAIL(error.str());
 }
@@ -2480,4 +2417,4 @@ core::TypedExprPtr PlanBuilder::inferTypes(
   return core::Expressions::inferTypes(
       untypedExpr, planNode_->outputType(), pool_);
 }
-} // namespace facebook::velox::exec::test
+} // namespace facebook::velox::connector::lakehouse::common::test
