@@ -306,112 +306,83 @@ class IcebergReadEqualityDeletes : public IcebergReadTestBase,
     return dataFilePaths;
   }
 
-  // Helper functions to create typed test data for different types
-  void assertEqualityDeletesForType(
-      const TypePtr& type, 
-      const std::vector<int64_t>& deleteValues,
-      const std::string& duckDbSql = "") {
+  // Template helper to run equality deletes tests for different types
+  template<TypeKind KIND>
+  void runEqualityDeletesTest(const std::vector<int64_t>& deleteValues, const std::string& duckDbSql = "") {
+    using T = typename TypeTraits<KIND>::NativeType;
     
     std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
     equalityFieldIdsMap.insert({0, {1}});
     
-    switch (type->kind()) {
-      case TypeKind::TINYINT: {
-        std::vector<int8_t> typedValues;
-        typedValues.reserve(deleteValues.size());
-        for (auto val : deleteValues) {
-          typedValues.push_back(static_cast<int8_t>(val));
-        }
-        std::unordered_map<int8_t, std::vector<std::vector<int8_t>>> equalityDeleteVectorMap;
-        equalityDeleteVectorMap.insert({0, {typedValues}});
-        assertEqualityDeletes<TypeKind::TINYINT>(equalityDeleteVectorMap, equalityFieldIdsMap, duckDbSql);
-        break;
-      }
-      case TypeKind::SMALLINT: {
-        std::vector<int16_t> typedValues;
-        typedValues.reserve(deleteValues.size());
-        for (auto val : deleteValues) {
-          typedValues.push_back(static_cast<int16_t>(val));
-        }
-        std::unordered_map<int8_t, std::vector<std::vector<int16_t>>> equalityDeleteVectorMap;
-        equalityDeleteVectorMap.insert({0, {typedValues}});
-        assertEqualityDeletes<TypeKind::SMALLINT>(equalityDeleteVectorMap, equalityFieldIdsMap, duckDbSql);
-        break;
-      }
-      case TypeKind::INTEGER: {
-        std::vector<int32_t> typedValues;
-        typedValues.reserve(deleteValues.size());
-        for (auto val : deleteValues) {
-          typedValues.push_back(static_cast<int32_t>(val));
-        }
-        std::unordered_map<int8_t, std::vector<std::vector<int32_t>>> equalityDeleteVectorMap;
-        equalityDeleteVectorMap.insert({0, {typedValues}});
-        assertEqualityDeletes<TypeKind::INTEGER>(equalityDeleteVectorMap, equalityFieldIdsMap, duckDbSql);
-        break;
-      }
-      case TypeKind::BIGINT: {
-        std::unordered_map<int8_t, std::vector<std::vector<int64_t>>> equalityDeleteVectorMap;
-        equalityDeleteVectorMap.insert({0, {deleteValues}});
-        assertEqualityDeletes<TypeKind::BIGINT>(equalityDeleteVectorMap, equalityFieldIdsMap, duckDbSql);
-        break;
-      }
-      case TypeKind::VARCHAR: {
-        // For string types, convert int values to strings using the sample data
-        const std::vector<std::string> sampleStrings = {
-            "apple", "banana", "cherry", "date", "elderberry",
-            "fig", "grape", "honeydew", "kiwi", "lemon",
-            "mango", "nectarine", "orange", "papaya", "quince",
-            "raspberry", "strawberry", "tangerine", "watermelon", "zucchini"
-        };
-        
-        std::vector<std::string> strings;
-        std::vector<StringView> typedValues;
-        strings.reserve(deleteValues.size());
-        typedValues.reserve(deleteValues.size());
-        
-        for (auto val : deleteValues) {
-          auto stringIndex = val % sampleStrings.size();
+    if constexpr (KIND == TypeKind::BIGINT) {
+      std::unordered_map<int8_t, std::vector<std::vector<int64_t>>> equalityDeleteVectorMap;
+      equalityDeleteVectorMap.insert({0, {deleteValues}});
+      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap, duckDbSql);
+    } else if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
+      // For string types, convert int values to strings using the sample data from makeVectors
+      const std::vector<std::string> sampleStrings = {
+          "apple", "banana", "cherry", "date", "elderberry",
+          "fig", "grape", "honeydew", "kiwi", "lemon",
+          "mango", "nectarine", "orange", "papaya", "quince",
+          "raspberry", "strawberry", "tangerine", "watermelon", "zucchini"
+      };
+      
+      std::vector<std::string> strings;
+      std::vector<StringView> typedValues;
+      strings.reserve(deleteValues.size());
+      typedValues.reserve(deleteValues.size());
+      
+      for (auto val : deleteValues) {
+        auto stringIndex = val % sampleStrings.size();
+        if constexpr (KIND == TypeKind::VARCHAR) {
           strings.push_back(sampleStrings[stringIndex]);
-          typedValues.push_back(StringView(strings.back()));
-        }
-        
-        std::unordered_map<int8_t, std::vector<std::vector<StringView>>> equalityDeleteVectorMap;
-        equalityDeleteVectorMap.insert({0, {typedValues}});
-        assertEqualityDeletes<TypeKind::VARCHAR>(equalityDeleteVectorMap, equalityFieldIdsMap, duckDbSql);
-        break;
-      }
-      case TypeKind::VARBINARY: {
-        // For binary types, similar to VARCHAR but with binary data
-        const std::vector<std::string> sampleStrings = {
-            "apple", "banana", "cherry", "date", "elderberry",
-            "fig", "grape", "honeydew", "kiwi", "lemon",
-            "mango", "nectarine", "orange", "papaya", "quince",
-            "raspberry", "strawberry", "tangerine", "watermelon", "zucchini"
-        };
-        
-        std::vector<std::string> binaryStrings;
-        std::vector<StringView> typedValues;
-        binaryStrings.reserve(deleteValues.size());
-        typedValues.reserve(deleteValues.size());
-        
-        for (auto val : deleteValues) {
-          auto stringIndex = val % sampleStrings.size();
+        } else {  // VARBINARY
           const std::string& baseString = sampleStrings[stringIndex];
-          
           std::string binaryStr;
           for (char c : baseString) {
             binaryStr += static_cast<unsigned char>(c);
           }
-          
-          binaryStrings.push_back(binaryStr);
-          typedValues.push_back(StringView(binaryStrings.back()));
+          strings.push_back(binaryStr);
         }
-        
-        std::unordered_map<int8_t, std::vector<std::vector<StringView>>> equalityDeleteVectorMap;
-        equalityDeleteVectorMap.insert({0, {typedValues}});
-        assertEqualityDeletes<TypeKind::VARBINARY>(equalityDeleteVectorMap, equalityFieldIdsMap, duckDbSql);
-        break;
+        typedValues.push_back(StringView(strings.back()));
       }
+      
+      std::unordered_map<int8_t, std::vector<std::vector<StringView>>> equalityDeleteVectorMap;
+      equalityDeleteVectorMap.insert({0, {typedValues}});
+      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap, duckDbSql);
+    } else if constexpr (std::is_integral_v<T>) {
+      std::vector<T> typedValues;
+      typedValues.reserve(deleteValues.size());
+      for (auto val : deleteValues) {
+        typedValues.push_back(static_cast<T>(val));
+      }
+      std::unordered_map<int8_t, std::vector<std::vector<T>>> equalityDeleteVectorMap;
+      equalityDeleteVectorMap.insert({0, {typedValues}});
+      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap, duckDbSql);
+    }
+  }
+
+  // Helper function to dispatch to the correct template based on runtime TypeKind
+  void callEqualityDeletesTest(const TypePtr& type, const std::vector<int64_t>& deleteValues, const std::string& duckDbSql = "") {
+    switch (type->kind()) {
+      case TypeKind::TINYINT:
+        runEqualityDeletesTest<TypeKind::TINYINT>(deleteValues, duckDbSql);
+        break;
+      case TypeKind::SMALLINT:
+        runEqualityDeletesTest<TypeKind::SMALLINT>(deleteValues, duckDbSql);
+        break;
+      case TypeKind::INTEGER:
+        runEqualityDeletesTest<TypeKind::INTEGER>(deleteValues, duckDbSql);
+        break;
+      case TypeKind::BIGINT:
+        runEqualityDeletesTest<TypeKind::BIGINT>(deleteValues, duckDbSql);
+        break;
+      case TypeKind::VARCHAR:
+        runEqualityDeletesTest<TypeKind::VARCHAR>(deleteValues, duckDbSql);
+        break;
+      case TypeKind::VARBINARY:
+        runEqualityDeletesTest<TypeKind::VARBINARY>(deleteValues, duckDbSql);
+        break;
       default:
         VELOX_FAIL("Unsupported type for equality deletes: {}", type->toString());
     }
@@ -1225,7 +1196,7 @@ TEST_P(IcebergReadEqualityDeletes, deleteFirstAndLastRows) {
   
   // Delete first and last rows using parameterized type
   std::vector<int64_t> deleteValues = {0, rowCount_ - 1};
-  assertEqualityDeletesForType(rowType->childAt(0), deleteValues);
+  callEqualityDeletesTest(rowType->childAt(0), deleteValues);
 }
 
 TEST_P(IcebergReadEqualityDeletes, deleteRandomRows) {
@@ -1248,7 +1219,7 @@ TEST_P(IcebergReadEqualityDeletes, deleteRandomRows) {
   for (auto idx : randomIndices) {
     deleteValues.push_back(static_cast<int64_t>(idx));
   }
-  assertEqualityDeletesForType(rowType->childAt(0), deleteValues);
+  callEqualityDeletesTest(rowType->childAt(0), deleteValues);
 }
 
 TEST_P(IcebergReadEqualityDeletes, deleteAllRows) {
@@ -1267,7 +1238,7 @@ TEST_P(IcebergReadEqualityDeletes, deleteAllRows) {
   
   // Delete all rows using parameterized type
   auto allRowsValues = makeSequenceValues<int64_t>(rowCount_);
-  assertEqualityDeletesForType(rowType->childAt(0), allRowsValues, "SELECT * FROM tmp WHERE 1 = 0");
+  callEqualityDeletesTest(rowType->childAt(0), allRowsValues, "SELECT * FROM tmp WHERE 1 = 0");
 }
 
 TEST_P(IcebergReadEqualityDeletes, deleteNoRows) {
@@ -1286,7 +1257,7 @@ TEST_P(IcebergReadEqualityDeletes, deleteNoRows) {
   
   // Delete no rows using parameterized type (empty delete vector)
   std::vector<int64_t> emptyDeleteValues;
-  assertEqualityDeletesForType(rowType->childAt(0), emptyDeleteValues);
+  callEqualityDeletesTest(rowType->childAt(0), emptyDeleteValues);
 }
 
 // Add the test methods that were previously in the parameterized class
