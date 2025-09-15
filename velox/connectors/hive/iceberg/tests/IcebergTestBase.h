@@ -21,6 +21,8 @@
 using namespace facebook::velox::exec::test;
 
 namespace facebook::velox::connector::hive::iceberg {
+
+enum class NullParam { kNoNulls, kPartialNulls, kAllNulls };
 class IcebergTestBase : public HiveConnectorTestBase {
  public:
   IcebergTestBase()
@@ -33,13 +35,12 @@ class IcebergTestBase : public HiveConnectorTestBase {
   }
 
  protected:
-  RowTypePtr rowType_{ROW({"c0"}, {BIGINT()})};
   dwio::common::FileFormat fileFormat_{dwio::common::FileFormat::DWRF};
   static constexpr int rowCount_ = 20000;
   std::shared_ptr<dwrf::Config> config_;
   std::function<std::unique_ptr<dwrf::DWRFFlushPolicy>()> flushPolicyFactory_;
 
-  std::vector<int64_t> makeRandomDeleteValues(int32_t maxRowNumber);
+  static std::vector<int64_t> makeRandomDeleteValues(int32_t maxRowNumber);
 
   template <class T>
   std::vector<T> makeSequenceValues(int32_t numRows, int8_t repeat = 1);
@@ -59,11 +60,19 @@ class IcebergTestBase : public HiveConnectorTestBase {
 
   /// Generate test data vectors with configurable null patterns
   template <TypeKind KIND>
-  std::vector<RowVectorPtr> makeVectors(
+  std::vector<RowVectorPtr> makeVectorsImpl(
       int32_t count,
       int32_t rowsPerVector,
       int32_t numColumns = 1,
-      bool allNulls = false,
-      bool partialNull = false);
+      std::vector<NullParam> nullParam = {NullParam::kNoNulls});
+
+  /// Generate test data vectors with mixed column types and configurable null
+  /// patterns per column Uses the same logic as makeVectorsImpl but supports
+  /// different types for each column
+  std::vector<RowVectorPtr> makeVectors(
+      int32_t count,
+      int32_t rowsPerVector,
+      const std::vector<TypeKind>& columnTypes,
+      const std::vector<NullParam>& nullParams);
 };
 } // namespace facebook::velox::connector::hive::iceberg

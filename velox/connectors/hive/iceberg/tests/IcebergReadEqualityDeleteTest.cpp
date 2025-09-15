@@ -17,16 +17,222 @@
 #include "velox/common/base/tests/GTestUtils.h"
 #include "velox/connectors/hive/iceberg/tests/IcebergTestBase.h"
 #include "velox/exec/PlanNodeStats.h"
+#include "velox/vector/BaseVector.h"
+#include "velox/vector/tests/utils/VectorMaker.h"
 
 namespace facebook::velox::connector::hive::iceberg {
 
-enum class NullParam { kNoNulls, kPartialNulls, kAllNulls };
+struct TestParams {
+  std::vector<TypeKind> columnTypes;
+  std::vector<NullParam> nullParamForData;
+};
 
-class IcebergReadEqualityDeleteTest : public IcebergTestBase {
- protected:
+// Helper function to get a string representation of NullParam for test names
+std::string nullParamToString(NullParam param) {
+  switch (param) {
+    case NullParam::kNoNulls:
+      return "NoNulls";
+    case NullParam::kPartialNulls:
+      return "PartialNulls";
+    case NullParam::kAllNulls:
+      return "AllNulls";
+    default:
+      return "Unknown";
+  }
+}
+
+// Helper function to get a string representation of TestParams for test names
+std::string testParamsToString(const TestParams& params) {
+  std::string result;
+  for (size_t i = 0; i < params.columnTypes.size(); ++i) {
+    result += mapTypeKindToName(params.columnTypes[i]) +
+        nullParamToString(params.nullParamForData[i]);
+  }
+  return result;
+}
+
+class IcebergReadEqualityDeleteTest
+    : public IcebergTestBase,
+      public testing::WithParamInterface<TestParams> {
+ private:
+  std::shared_ptr<TempFilePath> writeEqualityDeleteFile(
+      const std::vector<RowVectorPtr>& deleteVectors) {
+    VELOX_CHECK_GT(deleteVectors.size(), 0);
+
+    // Combine all delete vectors into one
+    auto deleteFilePath = TempFilePath::create();
+    writeToFile(deleteFilePath->getPath(), deleteVectors);
+
+    return deleteFilePath;
+  }
+
+  std::string makeTypePredicate(
+      const std::string& columnName,
+      TypeKind columnType,
+      const std::string& valueStr) {
+    switch (columnType) {
+      case TypeKind::VARCHAR:
+      case TypeKind::VARBINARY:
+        return fmt::format(
+            "({} IS NULL OR {} <> '{}')", columnName, columnName, valueStr);
+      case TypeKind::TINYINT:
+      case TypeKind::SMALLINT:
+      case TypeKind::INTEGER:
+      case TypeKind::BIGINT:
+        return fmt::format(
+            "({} IS NULL OR {} <> {})", columnName, columnName, valueStr);
+      default:
+        VELOX_FAIL(
+            "Unsupported predicate type: {}", mapTypeKindToName(columnType));
+    }
+  }
+
+  std::string makeTypePredicates(
+      const std::vector<RowVectorPtr>& deleteVectors,
+      const std::vector<int32_t>& equalityFieldIds,
+      const std::vector<TypeKind>& columnTypes) {
+    VELOX_CHECK_EQ(deleteVectors.size(), 1);
+    VELOX_CHECK_EQ(equalityFieldIds.size(), columnTypes.size());
+
+    if (deleteVectors.empty()) {
+      return "";
+    }
+
+    // Get the number of delete rows from the first vector
+    int32_t numDeletedRows = deleteVectors[0]->size();
+    auto deleteRowVector = deleteVectors[0];
+
+    std::string predicates;
+
+    // Build predicates for each row to be deleted
+    for (int32_t row = 0; row < numDeletedRows; ++row) {
+      if (row > 0) {
+        predicates += " AND ";
+      }
+
+      std::string rowPredicate = "(";
+
+      // For each column in this delete row
+      for (size_t i = 0; i < equalityFieldIds.size(); ++i) {
+        if (i > 0) {
+          rowPredicate += " AND ";
+        }
+
+        auto deleteVector = deleteRowVector->childAt(i);
+        auto fieldId = equalityFieldIds[i];
+        auto columnType = columnTypes[i];
+        std::string columnName = fmt::format("c{}", fieldId - 1);
+
+        // Check if the delete value is null
+        if (deleteVector->isNullAt(row)) {
+          // For null delete values, we exclude rows with null values
+          rowPredicate += fmt::format("{} IS NOT NULL", columnName);
+        } else {
+          std::string valueStr;
+          switch (columnType) {
+            case TypeKind::TINYINT: {
+              auto vector = deleteVector->as<FlatVector<int8_t>>();
+              valueStr = std::to_string(vector->valueAt(row));
+              break;
+            }
+            case TypeKind::SMALLINT: {
+              auto vector = deleteVector->as<FlatVector<int16_t>>();
+              valueStr = std::to_string(vector->valueAt(row));
+              break;
+            }
+            case TypeKind::INTEGER: {
+              auto vector = deleteVector->as<FlatVector<int32_t>>();
+              valueStr = std::to_string(vector->valueAt(row));
+              break;
+            }
+            case TypeKind::BIGINT: {
+              auto vector = deleteVector->as<FlatVector<int64_t>>();
+              valueStr = std::to_string(vector->valueAt(row));
+              break;
+            }
+            case TypeKind::VARCHAR:
+            case TypeKind::VARBINARY: {
+              auto vector = deleteVector->as<FlatVector<StringView>>();
+              valueStr = vector->valueAt(row).str();
+              break;
+            }
+            default:
+              VELOX_FAIL(
+                  "Unsupported type for predicate: {}",
+                  mapTypeKindToName(columnType));
+          }
+          rowPredicate += makeTypePredicate(columnName, columnType, valueStr);
+        }
+      }
+
+      rowPredicate += ")";
+      predicates += rowPredicate;
+    }
+
+    return predicates;
+  }
+
+ public:
+  void assertEqualityDeletes(
+      const std::vector<TypeKind>& columnTypes,
+      const std::vector<NullParam>& nullParams,
+      const std::vector<RowVectorPtr>& deleteVectors,
+      const std::vector<int32_t>& equalityFieldIds,
+      std::string duckDbSql = "") {
+    folly::SingletonVault::singleton()->registrationComplete();
+
+    std::vector<RowVectorPtr> dataVectors =
+        makeVectors(1, rowCount_, columnTypes, nullParams);
+
+    // Write data file
+    auto dataFilePath = TempFilePath::create();
+    writeToFile(dataFilePath->getPath(), dataVectors);
+
+    // Create DuckDB table for comparison
+    createDuckDbTable(dataVectors);
+
+    // Write delete file
+    auto deleteFilePath = writeEqualityDeleteFile(deleteVectors);
+
+    // Create Iceberg delete file info
+    std::vector<connector::hive::iceberg::IcebergDeleteFile> deleteFiles;
+    int64_t deleteFileSize = 0;
+    for (auto& deleteVec : deleteVectors) {
+      deleteFileSize += deleteVec->size();
+    }
+
+    IcebergDeleteFile deleteFile(
+        FileContent::kEqualityDeletes,
+        deleteFilePath->getPath(),
+        fileFormat_,
+        deleteFileSize,
+        testing::internal::GetFileSize(
+            std::fopen(deleteFilePath->getPath().c_str(), "r")),
+        equalityFieldIds);
+    deleteFiles.push_back(deleteFile);
+
+    auto icebergSplits =
+        makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
+
+    // Generate DuckDB query
+    if (duckDbSql == "") {
+      duckDbSql = "SELECT * FROM tmp ";
+      if (deleteFileSize > 0) {
+        std::string predicates =
+            makeTypePredicates(deleteVectors, equalityFieldIds, columnTypes);
+        if (!predicates.empty()) {
+          duckDbSql += fmt::format("WHERE {}", predicates);
+        }
+      }
+    }
+
+    assertQuery(
+        icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
+  }
+
   void assertQuery(
       std::shared_ptr<connector::ConnectorSplit> split,
-      RowTypePtr outputRowType,
+      const RowTypePtr& outputRowType,
       const std::string& duckDbSql) {
     auto plan = tableScanNode(outputRowType);
     auto task = OperatorTestBase::assertQuery(plan, {split}, duckDbSql);
@@ -36,110 +242,6 @@ class IcebergReadEqualityDeleteTest : public IcebergTestBase {
     auto it = planStats.find(scanNodeId);
     ASSERT_TRUE(it != planStats.end());
     ASSERT_TRUE(it->second.peakMemoryBytes > 0);
-  }
-
-  /// Asserts equality delete functionality for a given type.
-  /// @tparam KIND The type kind (e.g., INTEGER, VARCHAR).
-  /// @param equalityDeleteVectorMap A map of equality delete vectors.
-  /// @param equalityFieldIdsMap A map of equality field IDs.
-  /// @param duckDbSql The SQL query to validate against DuckDB (optional).
-  /// @param dataVectors Pre-created data vectors (optional).
-  template <TypeKind KIND>
-  void assertEqualityDeletes(
-      const std::unordered_map<
-          int8_t,
-          std::vector<std::vector<typename TypeTraits<KIND>::NativeType>>>&
-          equalityDeleteVectorMap,
-      const std::unordered_map<int8_t, std::vector<int32_t>>&
-          equalityFieldIdsMap,
-      std::string duckDbSql = "",
-      std::vector<RowVectorPtr> dataVectors = {}) {
-    VELOX_CHECK_EQ(equalityDeleteVectorMap.size(), equalityFieldIdsMap.size());
-    // We will create data vectors with numColumns number of columns that is the
-    // max field ID in equalityFieldIds
-    int32_t numDataColumns = 0;
-
-    for (auto it = equalityFieldIdsMap.begin(); it != equalityFieldIdsMap.end();
-         ++it) {
-      auto equalityFieldIds = it->second;
-      auto currentMax =
-          *std::max_element(equalityFieldIds.begin(), equalityFieldIds.end());
-      numDataColumns = std::max(numDataColumns, currentMax);
-    }
-
-    VELOX_CHECK_GT(numDataColumns, 0);
-    VELOX_CHECK_GE(numDataColumns, equalityDeleteVectorMap.size());
-    VELOX_CHECK_GT(equalityDeleteVectorMap.size(), 0);
-
-    VELOX_CHECK_LE(equalityFieldIdsMap.size(), numDataColumns);
-
-    std::shared_ptr<TempFilePath> dataFilePath =
-        writeDataFiles<KIND>(rowCount_, numDataColumns, 1, dataVectors)[0];
-
-    std::vector<connector::hive::iceberg::IcebergDeleteFile> deleteFiles;
-    std::string predicates = "";
-    unsigned long numDeletedValues = 0;
-
-    std::vector<std::shared_ptr<TempFilePath>> deleteFilePaths;
-    for (auto it = equalityFieldIdsMap.begin();
-         it != equalityFieldIdsMap.end();) {
-      auto equalityFieldIds = it->second;
-      auto equalityDeleteVector = equalityDeleteVectorMap.at(it->first);
-      VELOX_CHECK_GT(equalityDeleteVector.size(), 0);
-      numDeletedValues =
-          std::max(numDeletedValues, equalityDeleteVector[0].size());
-      deleteFilePaths.push_back(
-          writeEqualityDeleteFile<KIND>(equalityDeleteVector));
-      IcebergDeleteFile deleteFile(
-          FileContent::kEqualityDeletes,
-          deleteFilePaths.back()->getPath(),
-          fileFormat_,
-          equalityDeleteVector[0].size(),
-          testing::internal::GetFileSize(
-              std::fopen(deleteFilePaths.back()->getPath().c_str(), "r")),
-          equalityFieldIds);
-      deleteFiles.push_back(deleteFile);
-      predicates +=
-          makePredicates<KIND>(equalityDeleteVector, equalityFieldIds);
-      ++it;
-      if (it != equalityFieldIdsMap.end()) {
-        predicates += " AND ";
-      }
-    }
-
-    // The default split count is 1.
-    auto icebergSplits =
-        makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
-
-    // If the caller passed in a query, use that.
-    if (duckDbSql == "") {
-      // Select all columns
-      duckDbSql = "SELECT * FROM tmp ";
-      if (numDeletedValues > 0) {
-        duckDbSql += fmt::format("WHERE {}", predicates);
-      }
-    }
-
-    assertQuery(
-        icebergSplits.back(),
-        !dataVectors.empty() ? asRowType(dataVectors[0]->type()) : rowType_,
-        duckDbSql);
-
-    // Select a column that's not in the filter columns
-    if (numDataColumns > 1 &&
-        equalityDeleteVectorMap.at(0).size() < numDataColumns) {
-      std::string duckDbQuery = "SELECT c0 FROM tmp";
-      if (numDeletedValues > 0) {
-        duckDbQuery += fmt::format(" WHERE {}", predicates);
-      }
-
-      std::vector<std::string> names({"c0"});
-      std::vector<TypePtr> types(1, createScalarType<KIND>());
-      assertQuery(
-          icebergSplits.back(),
-          std::make_shared<RowType>(std::move(names), std::move(types)),
-          duckDbQuery);
-    }
   }
 
   /// Creates data files for Iceberg testing with simple row/column
@@ -168,7 +270,7 @@ class IcebergReadEqualityDeleteTest : public IcebergTestBase {
       int32_t splitCount = 1,
       std::vector<RowVectorPtr> dataVectors = {}) {
     if (dataVectors.empty()) {
-      dataVectors = makeVectors<KIND>(splitCount, numRows, numColumns);
+      dataVectors = makeVectorsImpl<KIND>(splitCount, numRows, numColumns);
     }
     VELOX_CHECK_EQ(dataVectors.size(), splitCount);
 
@@ -183,1542 +285,630 @@ class IcebergReadEqualityDeleteTest : public IcebergTestBase {
     return dataFilePaths;
   }
 
- private:
-  /// Write equality delete file with typed data
-  template <TypeKind KIND>
-  std::shared_ptr<TempFilePath> writeEqualityDeleteFile(
-      const std::vector<std::vector<typename TypeTraits<KIND>::NativeType>>&
-          equalityDeleteVector) {
-    using T = typename TypeTraits<KIND>::NativeType;
-    std::vector<std::string> names;
-    std::vector<VectorPtr> vectors;
-    for (int i = 0; i < equalityDeleteVector.size(); i++) {
-      names.push_back(fmt::format("c{}", i));
-      vectors.push_back(makeFlatVector<T>(equalityDeleteVector[i]));
+  void testSubFieldEqualityDelete() {
+    TestParams params = GetParam();
+
+    // Skip floating point types for this test
+    for (auto columnType : params.columnTypes) {
+      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE) {
+        GTEST_SKIP()
+            << "Skipping floating point types for testSubFieldEqualityDelete";
+      }
     }
 
-    RowVectorPtr const deleteFileVectors = makeRowVector(names, vectors);
+    folly::SingletonVault::singleton()->registrationComplete();
 
+    // Write the base file
+    std::shared_ptr<TempFilePath> dataFilePath = TempFilePath::create();
+    std::vector<RowVectorPtr> dataVectors = {makeRowVector(
+        {"c_bigint", "c_row"},
+        {makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
+         makeRowVector(
+             {"c0", "c1", "c2"},
+             {makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
+              makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
+              makeFlatVector<int64_t>(
+                  20, [](auto row) { return row + 1; })})})};
+    int32_t numDataColumns = 1;
+    dataFilePath = writeDataFiles<TypeKind::BIGINT>(
+        rowCount_, numDataColumns, 1, dataVectors)[0];
+
+    // Write the delete file. Equality delete field is c_row.c1
+    std::vector<IcebergDeleteFile> deleteFiles;
+    // Delete rows {0, 1} from c_row.c1, whose schema ID is 4
+    std::vector<RowVectorPtr> deleteDataVectors = {makeRowVector(
+        {"c1"},
+        {makeFlatVector<int64_t>(2, [](auto row) { return row + 1; })})};
+
+    std::vector<std::shared_ptr<TempFilePath>> deleteFilePaths;
+    auto equalityFieldIds = std::vector<int32_t>({4});
     auto deleteFilePath = TempFilePath::create();
-    writeToFile(deleteFilePath->getPath(), deleteFileVectors);
+    writeToFile(deleteFilePath->getPath(), deleteDataVectors.back());
+    deleteFilePaths.push_back(deleteFilePath);
+    IcebergDeleteFile deleteFile(
+        FileContent::kEqualityDeletes,
+        deleteFilePaths.back()->getPath(),
+        fileFormat_,
+        2,
+        testing::internal::GetFileSize(
+            std::fopen(deleteFilePaths.back()->getPath().c_str(), "r")),
+        equalityFieldIds);
+    deleteFiles.push_back(deleteFile);
 
-    return deleteFilePath;
+    auto icebergSplits =
+        makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
+
+    // Select both c_bigint and c_row column columns
+    std::string duckDbSql = "SELECT * FROM tmp WHERE c_row.c0 not in (1, 2)";
+    assertQuery(
+        icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
+
+    // SELECT only c_bigint column
+    duckDbSql = "SELECT c_bigint FROM tmp WHERE c_row.c0 not in (1, 2)";
+    assertQuery(icebergSplits.back(), ROW({"c_bigint"}, {BIGINT()}), duckDbSql);
   }
 
-  /// Create typed predicate string for DuckDB queries
-  template <TypeKind KIND>
-  std::string makeTypedPredicate(
-      const std::string& columnName,
-      const typename TypeTraits<KIND>::NativeType& value) {
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      return fmt::format("({} <> '{}')", columnName, value);
-    } else if constexpr (
-        KIND == TypeKind::TINYINT || KIND == TypeKind::SMALLINT ||
-        KIND == TypeKind::INTEGER || KIND == TypeKind::BIGINT) {
-      return fmt::format("({} <> {})", columnName, value);
-    } else {
-      VELOX_FAIL("Unsupported predicate type : {}", TypeTraits<KIND>::name);
-    }
-  }
+  void testFloatAndDoubleThrowsError() {
+    TestParams params = GetParam();
 
-  /// Generate DuckDB predicates for equality delete testing
-  template <TypeKind KIND>
-  std::string makePredicates(
-      const std::vector<std::vector<typename TypeTraits<KIND>::NativeType>>&
-          equalityDeleteVector,
-      const std::vector<int32_t>& equalityFieldIds) {
-    using T = typename TypeTraits<KIND>::NativeType;
+    // Only test floating point types for this test
+    bool hasFloatingPointTypes = false;
+    TypeKind floatingPointType = TypeKind::REAL; // Default, will be updated
 
-    std::string predicates;
-    int32_t numDataColumns =
-        *std::max_element(equalityFieldIds.begin(), equalityFieldIds.end());
-
-    VELOX_CHECK_GT(numDataColumns, 0);
-    VELOX_CHECK_GE(numDataColumns, equalityDeleteVector.size());
-    VELOX_CHECK_GT(equalityDeleteVector.size(), 0);
-
-    auto numDeletedValues = equalityDeleteVector[0].size();
-
-    if (numDeletedValues == 0) {
-      return predicates;
-    }
-
-    // Check if all values for a column are deleted
-    for (auto i = 0; i < equalityDeleteVector.size(); i++) {
-      auto equalityFieldId = equalityFieldIds[i];
-      auto deleteValues = equalityDeleteVector[i];
-
-      // Make a copy to find unique values
-      auto uniqueValues = deleteValues;
-      std::sort(uniqueValues.begin(), uniqueValues.end());
-      auto lastIter = std::unique(uniqueValues.begin(), uniqueValues.end());
-      auto numDistinctValues = std::distance(uniqueValues.begin(), lastIter);
-
-      // For column with field ID n, the max value is (rowCount_-1)/(n)
-      // because values repeat n times
-      if (numDistinctValues > 0 && equalityFieldId > 0) {
-        auto maxPossibleValue = (rowCount_ - 1) / equalityFieldId;
-        if (numDistinctValues > maxPossibleValue) {
-          return "1 = 0";
-        }
+    for (auto columnType : params.columnTypes) {
+      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE) {
+        hasFloatingPointTypes = true;
+        floatingPointType = columnType;
+        break;
       }
     }
 
-    if (equalityDeleteVector.size() == 1) {
-      std::string name = fmt::format("c{}", equalityFieldIds[0] - 1);
-      predicates = fmt::format(
-          "({} IS NULL OR {} NOT IN ({}))",
-          name,
-          name,
-          makeNotInList<KIND>({equalityDeleteVector[0]}));
+    if (!hasFloatingPointTypes) {
+      GTEST_SKIP()
+          << "Skipping non-floating point types for testFloatAndDoubleThrowsError";
+      return;
+    }
+
+    // Create delete vectors using makeVectors
+    std::vector<RowVectorPtr> deleteVectors =
+        makeVectors(1, 2, params.columnTypes, params.nullParamForData);
+
+    std::vector<int32_t> equalityFieldIds;
+    for (size_t i = 0; i < params.columnTypes.size(); ++i) {
+      equalityFieldIds.push_back(static_cast<int32_t>(i + 1));
+    }
+
+    std::string expectedErrorMessage;
+    if (floatingPointType == TypeKind::REAL) {
+      expectedErrorMessage =
+          "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : REAL";
+      VELOX_ASSERT_THROW(
+          assertEqualityDeletes(
+              params.columnTypes,
+              params.nullParamForData,
+              deleteVectors,
+              equalityFieldIds),
+          expectedErrorMessage);
     } else {
-      for (int i = 0; i < numDeletedValues; i++) {
-        std::string oneRow;
-        for (int j = 0; j < equalityFieldIds.size(); j++) {
-          std::string const name = fmt::format("c{}", equalityFieldIds[j] - 1);
-          std::string predicate =
-              makeTypedPredicate<KIND>(name, equalityDeleteVector[j][i]);
+      expectedErrorMessage =
+          "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : DOUBLE";
+      VELOX_ASSERT_THROW(
+          assertEqualityDeletes(
+              params.columnTypes,
+              params.nullParamForData,
+              deleteVectors,
+              equalityFieldIds),
+          expectedErrorMessage);
+    }
+  }
 
-          oneRow = oneRow.empty()
-              ? predicate
-              : fmt::format("({} OR {})", oneRow, predicate);
-        }
+  void testDeleteFirstAndLastRows() {
+    TestParams params = GetParam();
 
-        predicates = predicates.empty()
-            ? oneRow
-            : fmt::format("{} AND {}", predicates, oneRow);
+    // Skip floating point types for this test
+    for (auto columnType : params.columnTypes) {
+      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE) {
+        GTEST_SKIP()
+            << "Skipping floating point types for testDeleteFirstAndLastRows";
       }
     }
-    return predicates;
+
+    folly::SingletonVault::singleton()->registrationComplete();
+
+    // Create test data using makeVectors
+    std::vector<RowVectorPtr> dataVectors =
+        makeVectors(1, rowCount_, params.columnTypes, params.nullParamForData);
+
+    // Create delete vectors with first and last row values
+    std::vector<VectorPtr> deleteVectorColumns;
+    std::vector<std::string> columnNames;
+
+    for (size_t i = 0; i < params.columnTypes.size(); ++i) {
+      columnNames.push_back(fmt::format("c{}", i));
+      auto dataColumn = dataVectors[0]->childAt(i);
+
+      switch (params.columnTypes[i]) {
+        case TypeKind::TINYINT: {
+          auto flatVector = dataColumn->as<FlatVector<int8_t>>();
+          std::vector<int8_t> deleteValues = {
+              flatVector->valueAt(0), flatVector->valueAt(rowCount_ - 1)};
+          deleteVectorColumns.push_back(makeFlatVector<int8_t>(deleteValues));
+          break;
+        }
+        case TypeKind::SMALLINT: {
+          auto flatVector = dataColumn->as<FlatVector<int16_t>>();
+          std::vector<int16_t> deleteValues = {
+              flatVector->valueAt(0), flatVector->valueAt(rowCount_ - 1)};
+          deleteVectorColumns.push_back(makeFlatVector<int16_t>(deleteValues));
+          break;
+        }
+        case TypeKind::INTEGER: {
+          auto flatVector = dataColumn->as<FlatVector<int32_t>>();
+          std::vector<int32_t> deleteValues = {
+              flatVector->valueAt(0), flatVector->valueAt(rowCount_ - 1)};
+          deleteVectorColumns.push_back(makeFlatVector<int32_t>(deleteValues));
+          break;
+        }
+        case TypeKind::BIGINT: {
+          auto flatVector = dataColumn->as<FlatVector<int64_t>>();
+          std::vector<int64_t> deleteValues = {
+              flatVector->valueAt(0), flatVector->valueAt(rowCount_ - 1)};
+          deleteVectorColumns.push_back(makeFlatVector<int64_t>(deleteValues));
+          break;
+        }
+        case TypeKind::VARCHAR:
+        case TypeKind::VARBINARY: {
+          auto flatVector = dataColumn->as<FlatVector<StringView>>();
+          std::vector<StringView> deleteValues = {
+              flatVector->valueAt(0), flatVector->valueAt(rowCount_ - 1)};
+          deleteVectorColumns.push_back(
+              makeFlatVector<StringView>(deleteValues));
+          break;
+        }
+        default:
+          VELOX_FAIL(
+              "Unsupported type for testDeleteFirstAndLastRows: {}",
+              mapTypeKindToName(params.columnTypes[i]));
+      }
+    }
+
+    std::vector<RowVectorPtr> deleteVectors = {
+        makeRowVector(columnNames, deleteVectorColumns)};
+
+    // Create equality field IDs (all columns)
+    std::vector<int32_t> equalityFieldIds;
+    for (size_t i = 0; i < params.columnTypes.size(); ++i) {
+      equalityFieldIds.push_back(static_cast<int32_t>(i + 1));
+    }
+
+    assertEqualityDeletes(
+        params.columnTypes,
+        params.nullParamForData,
+        deleteVectors,
+        equalityFieldIds);
+  }
+
+  void testDeleteRandomRows() {
+    TestParams params = GetParam();
+
+    // Skip floating point types for this test
+    for (auto columnType : params.columnTypes) {
+      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE) {
+        GTEST_SKIP()
+            << "Skipping floating point types for testDeleteRandomRows";
+      }
+    }
+
+    folly::SingletonVault::singleton()->registrationComplete();
+
+    // Create test data using makeVectors
+    std::vector<RowVectorPtr> dataVectors =
+        makeVectors(1, rowCount_, params.columnTypes, params.nullParamForData);
+
+    // Generate random indices to delete
+    auto randomIndices = makeRandomDeleteValues(rowCount_);
+
+    // Create delete vectors with random row values
+    std::vector<VectorPtr> deleteVectorColumns;
+    std::vector<std::string> columnNames;
+
+    for (size_t i = 0; i < params.columnTypes.size(); ++i) {
+      columnNames.push_back(fmt::format("c{}", i));
+      auto dataColumn = dataVectors[0]->childAt(i);
+
+      switch (params.columnTypes[i]) {
+        case TypeKind::TINYINT: {
+          auto flatVector = dataColumn->as<FlatVector<int8_t>>();
+          std::vector<int8_t> deleteValues;
+          for (auto idx : randomIndices) {
+            deleteValues.push_back(flatVector->valueAt(idx));
+          }
+          deleteVectorColumns.push_back(makeFlatVector<int8_t>(deleteValues));
+          break;
+        }
+        case TypeKind::SMALLINT: {
+          auto flatVector = dataColumn->as<FlatVector<int16_t>>();
+          std::vector<int16_t> deleteValues;
+          for (auto idx : randomIndices) {
+            deleteValues.push_back(flatVector->valueAt(idx));
+          }
+          deleteVectorColumns.push_back(makeFlatVector<int16_t>(deleteValues));
+          break;
+        }
+        case TypeKind::INTEGER: {
+          auto flatVector = dataColumn->as<FlatVector<int32_t>>();
+          std::vector<int32_t> deleteValues;
+          for (auto idx : randomIndices) {
+            deleteValues.push_back(flatVector->valueAt(idx));
+          }
+          deleteVectorColumns.push_back(makeFlatVector<int32_t>(deleteValues));
+          break;
+        }
+        case TypeKind::BIGINT: {
+          auto flatVector = dataColumn->as<FlatVector<int64_t>>();
+          std::vector<int64_t> deleteValues;
+          for (auto idx : randomIndices) {
+            deleteValues.push_back(flatVector->valueAt(idx));
+          }
+          deleteVectorColumns.push_back(makeFlatVector<int64_t>(deleteValues));
+          break;
+        }
+        case TypeKind::VARCHAR:
+        case TypeKind::VARBINARY: {
+          auto flatVector = dataColumn->as<FlatVector<StringView>>();
+          std::vector<StringView> deleteValues;
+          for (auto idx : randomIndices) {
+            deleteValues.push_back(flatVector->valueAt(idx));
+          }
+          deleteVectorColumns.push_back(
+              makeFlatVector<StringView>(deleteValues));
+          break;
+        }
+        default:
+          VELOX_FAIL(
+              "Unsupported type for testDeleteRandomRows: {}",
+              mapTypeKindToName(params.columnTypes[i]));
+      }
+    }
+
+    std::vector<RowVectorPtr> deleteVectors = {
+        makeRowVector(columnNames, deleteVectorColumns)};
+
+    // Create equality field IDs (all columns)
+    std::vector<int32_t> equalityFieldIds;
+    for (size_t i = 0; i < params.columnTypes.size(); ++i) {
+      equalityFieldIds.push_back(static_cast<int32_t>(i + 1));
+    }
+
+    assertEqualityDeletes(
+        params.columnTypes,
+        params.nullParamForData,
+        deleteVectors,
+        equalityFieldIds);
+  }
+
+  void testDeleteAllRows() {
+    TestParams params = GetParam();
+
+    // Skip floating point types for this test
+    for (auto columnType : params.columnTypes) {
+      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE) {
+        GTEST_SKIP() << "Skipping floating point types for testDeleteAllRows";
+      }
+    }
+
+    folly::SingletonVault::singleton()->registrationComplete();
+
+    // Create test data using makeVectors
+    std::vector<RowVectorPtr> dataVectors =
+        makeVectors(1, rowCount_, params.columnTypes, params.nullParamForData);
+
+    // Create delete vectors with all row values
+    std::vector<VectorPtr> deleteVectorColumns;
+    std::vector<std::string> columnNames;
+
+    for (size_t i = 0; i < params.columnTypes.size(); ++i) {
+      columnNames.push_back(fmt::format("c{}", i));
+      auto dataColumn = dataVectors[0]->childAt(i);
+
+      switch (params.columnTypes[i]) {
+        case TypeKind::TINYINT: {
+          auto flatVector = dataColumn->as<FlatVector<int8_t>>();
+          std::vector<int8_t> deleteValues;
+          deleteValues.reserve(rowCount_);
+          for (int j = 0; j < rowCount_; ++j) {
+            deleteValues.push_back(flatVector->valueAt(j));
+          }
+          deleteVectorColumns.push_back(makeFlatVector<int8_t>(deleteValues));
+          break;
+        }
+        case TypeKind::SMALLINT: {
+          auto flatVector = dataColumn->as<FlatVector<int16_t>>();
+          std::vector<int16_t> deleteValues;
+          deleteValues.reserve(rowCount_);
+          for (int j = 0; j < rowCount_; ++j) {
+            deleteValues.push_back(flatVector->valueAt(j));
+          }
+          deleteVectorColumns.push_back(makeFlatVector<int16_t>(deleteValues));
+          break;
+        }
+        case TypeKind::INTEGER: {
+          auto flatVector = dataColumn->as<FlatVector<int32_t>>();
+          std::vector<int32_t> deleteValues;
+          deleteValues.reserve(rowCount_);
+          for (int j = 0; j < rowCount_; ++j) {
+            deleteValues.push_back(flatVector->valueAt(j));
+          }
+          deleteVectorColumns.push_back(makeFlatVector<int32_t>(deleteValues));
+          break;
+        }
+        case TypeKind::BIGINT: {
+          auto flatVector = dataColumn->as<FlatVector<int64_t>>();
+          std::vector<int64_t> deleteValues;
+          deleteValues.reserve(rowCount_);
+          for (int j = 0; j < rowCount_; ++j) {
+            deleteValues.push_back(flatVector->valueAt(j));
+          }
+          deleteVectorColumns.push_back(makeFlatVector<int64_t>(deleteValues));
+          break;
+        }
+        case TypeKind::VARCHAR:
+        case TypeKind::VARBINARY: {
+          auto flatVector = dataColumn->as<FlatVector<StringView>>();
+          std::vector<StringView> deleteValues;
+          deleteValues.reserve(rowCount_);
+          for (int j = 0; j < rowCount_; ++j) {
+            deleteValues.push_back(flatVector->valueAt(j));
+          }
+          deleteVectorColumns.push_back(
+              makeFlatVector<StringView>(deleteValues));
+          break;
+        }
+        default:
+          VELOX_FAIL(
+              "Unsupported type for testDeleteAllRows: {}",
+              mapTypeKindToName(params.columnTypes[i]));
+      }
+    }
+
+    std::vector<RowVectorPtr> deleteVectors = {
+        makeRowVector(columnNames, deleteVectorColumns)};
+
+    // Create equality field IDs (all columns)
+    std::vector<int32_t> equalityFieldIds;
+    for (size_t i = 0; i < params.columnTypes.size(); ++i) {
+      equalityFieldIds.push_back(static_cast<int32_t>(i + 1));
+    }
+
+    assertEqualityDeletes(
+        params.columnTypes,
+        params.nullParamForData,
+        deleteVectors,
+        equalityFieldIds);
+  }
+
+  void testDeleteNoRows() {
+    TestParams params = GetParam();
+
+    // Skip floating point types for this test
+    for (auto columnType : params.columnTypes) {
+      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE) {
+        GTEST_SKIP() << "Skipping floating point types for testDeleteNoRows";
+        return;
+      }
+    }
+
+    folly::SingletonVault::singleton()->registrationComplete();
+
+    // Create empty delete vectors (no rows to delete)
+    std::vector<VectorPtr> deleteVectorColumns;
+    std::vector<std::string> columnNames;
+
+    for (size_t i = 0; i < params.columnTypes.size(); ++i) {
+      columnNames.push_back(fmt::format("c{}", i));
+
+      switch (params.columnTypes[i]) {
+        case TypeKind::TINYINT:
+          deleteVectorColumns.push_back(
+              makeFlatVector<int8_t>(std::vector<int8_t>{}));
+          break;
+        case TypeKind::SMALLINT:
+          deleteVectorColumns.push_back(
+              makeFlatVector<int16_t>(std::vector<int16_t>{}));
+          break;
+        case TypeKind::INTEGER:
+          deleteVectorColumns.push_back(
+              makeFlatVector<int32_t>(std::vector<int32_t>{}));
+          break;
+        case TypeKind::BIGINT:
+          deleteVectorColumns.push_back(
+              makeFlatVector<int64_t>(std::vector<int64_t>{}));
+          break;
+        case TypeKind::VARCHAR:
+        case TypeKind::VARBINARY:
+          deleteVectorColumns.push_back(
+              makeFlatVector<StringView>(std::vector<StringView>{}));
+          break;
+        default:
+          VELOX_FAIL(
+              "Unsupported type for testDeleteNoRows: {}",
+              mapTypeKindToName(params.columnTypes[i]));
+      }
+    }
+
+    std::vector<RowVectorPtr> deleteVectors = {
+        makeRowVector(columnNames, deleteVectorColumns)};
+
+    // Create equality field IDs (all columns)
+    std::vector<int32_t> equalityFieldIds;
+    for (size_t i = 0; i < params.columnTypes.size(); ++i) {
+      equalityFieldIds.push_back(static_cast<int32_t>(i + 1));
+    }
+
+    assertEqualityDeletes(
+        params.columnTypes,
+        params.nullParamForData,
+        deleteVectors,
+        equalityFieldIds);
   }
 };
 
-TEST_F(IcebergReadEqualityDeleteTest, testSubFieldEqualityDelete) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  // Write the base file
-  std::shared_ptr<TempFilePath> dataFilePath = TempFilePath::create();
-  std::vector<RowVectorPtr> dataVectors = {makeRowVector(
-      {"c_bigint", "c_row"},
-      {makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
-       makeRowVector(
-           {"c0", "c1", "c2"},
-           {makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
-            makeFlatVector<int64_t>(20, [](auto row) { return row + 1; }),
-            makeFlatVector<int64_t>(20, [](auto row) { return row + 1; })})})};
-  int32_t numDataColumns = 1;
-  dataFilePath = writeDataFiles<TypeKind::BIGINT>(
-      rowCount_, numDataColumns, 1, dataVectors)[0];
-
-  // Write the delete file. Equality delete field is c_row.c1
-  std::vector<IcebergDeleteFile> deleteFiles;
-  // Delete rows {0, 1} from c_row.c1, whose schema Id is 4
-  std::vector<RowVectorPtr> deleteDataVectors = {makeRowVector(
-      {"c1"}, {makeFlatVector<int64_t>(2, [](auto row) { return row + 1; })})};
-
-  std::vector<std::shared_ptr<TempFilePath>> deleteFilePaths;
-  auto equalityFieldIds = std::vector<int32_t>({4});
-  auto deleteFilePath = TempFilePath::create();
-  writeToFile(deleteFilePath->getPath(), deleteDataVectors.back());
-  deleteFilePaths.push_back(deleteFilePath);
-  IcebergDeleteFile deleteFile(
-      FileContent::kEqualityDeletes,
-      deleteFilePaths.back()->getPath(),
-      fileFormat_,
-      2,
-      testing::internal::GetFileSize(
-          std::fopen(deleteFilePaths.back()->getPath().c_str(), "r")),
-      equalityFieldIds);
-  deleteFiles.push_back(deleteFile);
-
-  auto icebergSplits = makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
-
-  // Select both c_bigint and c_row column columns
-  std::string duckDbSql = "SELECT * FROM tmp WHERE c_row.c0 not in (1, 2)";
-  assertQuery(
-      icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
-
-  // SELECT only c_bigint column
-  duckDbSql = "SELECT c_bigint FROM tmp WHERE c_row.c0 not in (1, 2)";
-  assertQuery(icebergSplits.back(), ROW({"c_bigint"}, {BIGINT()}), duckDbSql);
+TEST_P(IcebergReadEqualityDeleteTest, testSubFieldEqualityDelete) {
+  testSubFieldEqualityDelete();
 }
 
-TEST_F(IcebergReadEqualityDeleteTest, equalityDeletesMixedTypesInt64Varchar) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-  equalityFieldIdsMap.insert({0, {1, 2}});
-
-  // Create data vectors with int64_t and varchar columns
-  std::vector<RowVectorPtr> dataVectors = {makeRowVector(
-      {"c0", "c1"},
-      {makeFlatVector<int64_t>({0, 1, 2, 3, 4, 5, 6, 7, 8, 9}),
-       makeFlatVector<StringView>(
-           {"apple",
-            "banana",
-            "cherry",
-            "date",
-            "elderberry",
-            "fig",
-            "grape",
-            "honeydew",
-            "kiwi",
-            "lemon"})})};
-
-  // Test 1: Delete first and last rows
-  {
-    std::unordered_map<int8_t, std::vector<std::vector<int64_t>>> intDeleteMap;
-    std::unordered_map<int8_t, std::vector<std::vector<StringView>>>
-        stringDeleteMap;
-
-    intDeleteMap.insert({0, {{0, 9}}});
-    stringDeleteMap.insert({1, {{"apple", "lemon"}}});
-
-    // Write int64_t delete file
-    auto intDeleteFilePath = TempFilePath::create();
-    RowVectorPtr intDeleteVector =
-        makeRowVector({"c0"}, {makeFlatVector<int64_t>(intDeleteMap.at(0)[0])});
-    writeToFile(intDeleteFilePath->getPath(), intDeleteVector);
-
-    // Write varchar delete file
-    auto stringDeleteFilePath = TempFilePath::create();
-    RowVectorPtr stringDeleteVector = makeRowVector(
-        {"c1"}, {makeFlatVector<StringView>(stringDeleteMap.at(1)[0])});
-    writeToFile(stringDeleteFilePath->getPath(), stringDeleteVector);
-
-    std::vector<IcebergDeleteFile> deleteFiles;
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        intDeleteFilePath->getPath(),
-        fileFormat_,
-        2,
-        testing::internal::GetFileSize(
-            std::fopen(intDeleteFilePath->getPath().c_str(), "r")),
-        {1}));
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        stringDeleteFilePath->getPath(),
-        fileFormat_,
-        2,
-        testing::internal::GetFileSize(
-            std::fopen(stringDeleteFilePath->getPath().c_str(), "r")),
-        {2}));
-
-    auto dataFilePath = TempFilePath::create();
-    writeToFile(dataFilePath->getPath(), dataVectors);
-    auto icebergSplits =
-        makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
-
-    createDuckDbTable(dataVectors);
-    std::string duckDbSql =
-        "SELECT * FROM tmp WHERE c0 NOT IN (0, 9) AND c1 NOT IN ('apple', 'lemon')";
-    assertQuery(
-        icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
-  }
-
-  // Test 2: Delete random rows
-  {
-    std::unordered_map<int8_t, std::vector<std::vector<int64_t>>> intDeleteMap;
-    std::unordered_map<int8_t, std::vector<std::vector<StringView>>>
-        stringDeleteMap;
-
-    intDeleteMap.insert({0, {{1, 3, 5, 7}}});
-    stringDeleteMap.insert({1, {{"banana", "date", "fig", "honeydew"}}});
-
-    auto intDeleteFilePath = TempFilePath::create();
-    RowVectorPtr intDeleteVector =
-        makeRowVector({"c0"}, {makeFlatVector<int64_t>(intDeleteMap.at(0)[0])});
-    writeToFile(intDeleteFilePath->getPath(), intDeleteVector);
-
-    auto stringDeleteFilePath = TempFilePath::create();
-    RowVectorPtr stringDeleteVector = makeRowVector(
-        {"c1"}, {makeFlatVector<StringView>(stringDeleteMap.at(1)[0])});
-    writeToFile(stringDeleteFilePath->getPath(), stringDeleteVector);
-
-    std::vector<IcebergDeleteFile> deleteFiles;
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        intDeleteFilePath->getPath(),
-        fileFormat_,
-        4,
-        testing::internal::GetFileSize(
-            std::fopen(intDeleteFilePath->getPath().c_str(), "r")),
-        {1}));
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        stringDeleteFilePath->getPath(),
-        fileFormat_,
-        4,
-        testing::internal::GetFileSize(
-            std::fopen(stringDeleteFilePath->getPath().c_str(), "r")),
-        {2}));
-
-    auto dataFilePath = TempFilePath::create();
-    writeToFile(dataFilePath->getPath(), dataVectors);
-    auto icebergSplits =
-        makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
-
-    createDuckDbTable(dataVectors);
-    std::string duckDbSql =
-        "SELECT * FROM tmp WHERE c0 NOT IN (1, 3, 5, 7) AND c1 NOT IN ('banana', 'date', 'fig', 'honeydew')";
-    assertQuery(
-        icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
-  }
-
-  // Test 3: Delete all rows
-  {
-    std::unordered_map<int8_t, std::vector<std::vector<int64_t>>> intDeleteMap;
-    std::unordered_map<int8_t, std::vector<std::vector<StringView>>>
-        stringDeleteMap;
-
-    intDeleteMap.insert({0, {{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}}});
-    stringDeleteMap.insert(
-        {1,
-         {{"apple",
-           "banana",
-           "cherry",
-           "date",
-           "elderberry",
-           "fig",
-           "grape",
-           "honeydew",
-           "kiwi",
-           "lemon"}}});
-
-    auto intDeleteFilePath = TempFilePath::create();
-    RowVectorPtr intDeleteVector =
-        makeRowVector({"c0"}, {makeFlatVector<int64_t>(intDeleteMap.at(0)[0])});
-    writeToFile(intDeleteFilePath->getPath(), intDeleteVector);
-
-    auto stringDeleteFilePath = TempFilePath::create();
-    RowVectorPtr stringDeleteVector = makeRowVector(
-        {"c1"}, {makeFlatVector<StringView>(stringDeleteMap.at(1)[0])});
-    writeToFile(stringDeleteFilePath->getPath(), stringDeleteVector);
-
-    std::vector<IcebergDeleteFile> deleteFiles;
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        intDeleteFilePath->getPath(),
-        fileFormat_,
-        10,
-        testing::internal::GetFileSize(
-            std::fopen(intDeleteFilePath->getPath().c_str(), "r")),
-        {1}));
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        stringDeleteFilePath->getPath(),
-        fileFormat_,
-        10,
-        testing::internal::GetFileSize(
-            std::fopen(stringDeleteFilePath->getPath().c_str(), "r")),
-        {2}));
-
-    auto dataFilePath = TempFilePath::create();
-    writeToFile(dataFilePath->getPath(), dataVectors);
-    auto icebergSplits =
-        makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
-
-    createDuckDbTable(dataVectors);
-    std::string duckDbSql = "SELECT * FROM tmp WHERE 1 = 0";
-    assertQuery(
-        icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
-  }
-
-  // Test 4: Delete none
-  {
-    std::unordered_map<int8_t, std::vector<std::vector<int64_t>>> intDeleteMap;
-    std::unordered_map<int8_t, std::vector<std::vector<StringView>>>
-        stringDeleteMap;
-
-    intDeleteMap.insert({0, {{}}});
-    stringDeleteMap.insert({1, {{}}});
-
-    auto intDeleteFilePath = TempFilePath::create();
-    RowVectorPtr intDeleteVector =
-        makeRowVector({"c0"}, {makeFlatVector<int64_t>(intDeleteMap.at(0)[0])});
-    writeToFile(intDeleteFilePath->getPath(), intDeleteVector);
-
-    auto stringDeleteFilePath = TempFilePath::create();
-    RowVectorPtr stringDeleteVector = makeRowVector(
-        {"c1"}, {makeFlatVector<StringView>(stringDeleteMap.at(1)[0])});
-    writeToFile(stringDeleteFilePath->getPath(), stringDeleteVector);
-
-    std::vector<IcebergDeleteFile> deleteFiles;
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        intDeleteFilePath->getPath(),
-        fileFormat_,
-        0,
-        testing::internal::GetFileSize(
-            std::fopen(intDeleteFilePath->getPath().c_str(), "r")),
-        {1}));
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        stringDeleteFilePath->getPath(),
-        fileFormat_,
-        0,
-        testing::internal::GetFileSize(
-            std::fopen(stringDeleteFilePath->getPath().c_str(), "r")),
-        {2}));
-
-    auto dataFilePath = TempFilePath::create();
-    writeToFile(dataFilePath->getPath(), dataVectors);
-    auto icebergSplits =
-        makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
-
-    createDuckDbTable(dataVectors);
-    std::string duckDbSql = "SELECT * FROM tmp";
-    assertQuery(
-        icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
-  }
+TEST_P(IcebergReadEqualityDeleteTest, floatAndDoubleThrowsError) {
+  testFloatAndDoubleThrowsError();
 }
 
-TEST_F(
-    IcebergReadEqualityDeleteTest,
-    equalityDeletesMixedTypesTinyintVarbinary) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-  equalityFieldIdsMap.insert({0, {1, 2}});
-
-  // Create data vectors with int8_t and varbinary columns
-  std::vector<RowVectorPtr> dataVectors = {makeRowVector(
-      {"c0", "c1"},
-      {makeFlatVector<int8_t>({0, 1, 2, 3, 4, 5, 6, 7, 8, 9}),
-       makeFlatVector<StringView>(
-           {"\x01\x02",
-            "\x03\x04",
-            "\x05\x06",
-            "\x07\x08",
-            "\x09\x0A",
-            "\x0B\x0C",
-            "\x0D\x0E",
-            "\x0F\x10",
-            "\x11\x12",
-            "\x13\x14"})})};
-
-  // Test 1: Delete first and last rows
-  {
-    std::unordered_map<int8_t, std::vector<std::vector<int8_t>>> intDeleteMap;
-    std::unordered_map<int8_t, std::vector<std::vector<StringView>>>
-        binaryDeleteMap;
-
-    intDeleteMap.insert({0, {{0, 9}}});
-    binaryDeleteMap.insert({1, {{"\x01\x02", "\x13\x14"}}});
-
-    auto intDeleteFilePath = TempFilePath::create();
-    RowVectorPtr intDeleteVector =
-        makeRowVector({"c0"}, {makeFlatVector<int8_t>(intDeleteMap.at(0)[0])});
-    writeToFile(intDeleteFilePath->getPath(), intDeleteVector);
-
-    auto binaryDeleteFilePath = TempFilePath::create();
-    RowVectorPtr binaryDeleteVector = makeRowVector(
-        {"c1"}, {makeFlatVector<StringView>(binaryDeleteMap.at(1)[0])});
-    writeToFile(binaryDeleteFilePath->getPath(), binaryDeleteVector);
-
-    std::vector<IcebergDeleteFile> deleteFiles;
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        intDeleteFilePath->getPath(),
-        fileFormat_,
-        2,
-        testing::internal::GetFileSize(
-            std::fopen(intDeleteFilePath->getPath().c_str(), "r")),
-        {1}));
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        binaryDeleteFilePath->getPath(),
-        fileFormat_,
-        2,
-        testing::internal::GetFileSize(
-            std::fopen(binaryDeleteFilePath->getPath().c_str(), "r")),
-        {2}));
-
-    auto dataFilePath = TempFilePath::create();
-    writeToFile(dataFilePath->getPath(), dataVectors);
-    auto icebergSplits =
-        makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
-
-    createDuckDbTable(dataVectors);
-    std::string duckDbSql =
-        "SELECT * FROM tmp WHERE c0 NOT IN (0, 9) AND hex(c1) NOT IN ('0102', '1314')";
-    assertQuery(
-        icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
-  }
-
-  // Test 2: Delete random rows
-  {
-    std::unordered_map<int8_t, std::vector<std::vector<int8_t>>> intDeleteMap;
-    std::unordered_map<int8_t, std::vector<std::vector<StringView>>>
-        binaryDeleteMap;
-
-    intDeleteMap.insert({0, {{1, 3, 5, 7}}});
-    binaryDeleteMap.insert(
-        {1, {{"\x03\x04", "\x07\x08", "\x0B\x0C", "\x0F\x10"}}});
-
-    auto intDeleteFilePath = TempFilePath::create();
-    RowVectorPtr intDeleteVector =
-        makeRowVector({"c0"}, {makeFlatVector<int8_t>(intDeleteMap.at(0)[0])});
-    writeToFile(intDeleteFilePath->getPath(), intDeleteVector);
-
-    auto binaryDeleteFilePath = TempFilePath::create();
-    RowVectorPtr binaryDeleteVector = makeRowVector(
-        {"c1"}, {makeFlatVector<StringView>(binaryDeleteMap.at(1)[0])});
-    writeToFile(binaryDeleteFilePath->getPath(), binaryDeleteVector);
-
-    std::vector<IcebergDeleteFile> deleteFiles;
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        intDeleteFilePath->getPath(),
-        fileFormat_,
-        4,
-        testing::internal::GetFileSize(
-            std::fopen(intDeleteFilePath->getPath().c_str(), "r")),
-        {1}));
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        binaryDeleteFilePath->getPath(),
-        fileFormat_,
-        4,
-        testing::internal::GetFileSize(
-            std::fopen(binaryDeleteFilePath->getPath().c_str(), "r")),
-        {2}));
-
-    auto dataFilePath = TempFilePath::create();
-    writeToFile(dataFilePath->getPath(), dataVectors);
-    auto icebergSplits =
-        makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
-
-    createDuckDbTable(dataVectors);
-    std::string duckDbSql =
-        "SELECT * FROM tmp WHERE c0 NOT IN (1, 3, 5, 7) AND hex(c1) NOT IN ('0304', '0708', '0B0C', '0F10')";
-    assertQuery(
-        icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
-  }
-
-  // Test 3: Delete all rows
-  {
-    std::unordered_map<int8_t, std::vector<std::vector<int8_t>>> intDeleteMap;
-    std::unordered_map<int8_t, std::vector<std::vector<StringView>>>
-        binaryDeleteMap;
-
-    intDeleteMap.insert({0, {{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}}});
-    binaryDeleteMap.insert(
-        {1,
-         {{"\x01\x02",
-           "\x03\x04",
-           "\x05\x06",
-           "\x07\x08",
-           "\x09\x0A",
-           "\x0B\x0C",
-           "\x0D\x0E",
-           "\x0F\x10",
-           "\x11\x12",
-           "\x13\x14"}}});
-
-    auto intDeleteFilePath = TempFilePath::create();
-    RowVectorPtr intDeleteVector =
-        makeRowVector({"c0"}, {makeFlatVector<int8_t>(intDeleteMap.at(0)[0])});
-    writeToFile(intDeleteFilePath->getPath(), intDeleteVector);
-
-    auto binaryDeleteFilePath = TempFilePath::create();
-    RowVectorPtr binaryDeleteVector = makeRowVector(
-        {"c1"}, {makeFlatVector<StringView>(binaryDeleteMap.at(1)[0])});
-    writeToFile(binaryDeleteFilePath->getPath(), binaryDeleteVector);
-
-    std::vector<IcebergDeleteFile> deleteFiles;
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        intDeleteFilePath->getPath(),
-        fileFormat_,
-        10,
-        testing::internal::GetFileSize(
-            std::fopen(intDeleteFilePath->getPath().c_str(), "r")),
-        {1}));
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        binaryDeleteFilePath->getPath(),
-        fileFormat_,
-        10,
-        testing::internal::GetFileSize(
-            std::fopen(binaryDeleteFilePath->getPath().c_str(), "r")),
-        {2}));
-
-    auto dataFilePath = TempFilePath::create();
-    writeToFile(dataFilePath->getPath(), dataVectors);
-    auto icebergSplits =
-        makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
-
-    createDuckDbTable(dataVectors);
-    std::string duckDbSql = "SELECT * FROM tmp WHERE 1 = 0";
-    assertQuery(
-        icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
-  }
-
-  // Test 4: Delete none
-  {
-    std::unordered_map<int8_t, std::vector<std::vector<int8_t>>> intDeleteMap;
-    std::unordered_map<int8_t, std::vector<std::vector<StringView>>>
-        binaryDeleteMap;
-
-    intDeleteMap.insert({0, {{}}});
-    binaryDeleteMap.insert({1, {{}}});
-
-    auto intDeleteFilePath = TempFilePath::create();
-    RowVectorPtr intDeleteVector =
-        makeRowVector({"c0"}, {makeFlatVector<int8_t>(intDeleteMap.at(0)[0])});
-    writeToFile(intDeleteFilePath->getPath(), intDeleteVector);
-
-    auto binaryDeleteFilePath = TempFilePath::create();
-    RowVectorPtr binaryDeleteVector = makeRowVector(
-        {"c1"}, {makeFlatVector<StringView>(binaryDeleteMap.at(1)[0])});
-    writeToFile(binaryDeleteFilePath->getPath(), binaryDeleteVector);
-
-    std::vector<IcebergDeleteFile> deleteFiles;
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        intDeleteFilePath->getPath(),
-        fileFormat_,
-        0,
-        testing::internal::GetFileSize(
-            std::fopen(intDeleteFilePath->getPath().c_str(), "r")),
-        {1}));
-    deleteFiles.push_back(IcebergDeleteFile(
-        FileContent::kEqualityDeletes,
-        binaryDeleteFilePath->getPath(),
-        fileFormat_,
-        0,
-        testing::internal::GetFileSize(
-            std::fopen(binaryDeleteFilePath->getPath().c_str(), "r")),
-        {2}));
-
-    auto dataFilePath = TempFilePath::create();
-    writeToFile(dataFilePath->getPath(), dataVectors);
-    auto icebergSplits =
-        makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
-
-    createDuckDbTable(dataVectors);
-    std::string duckDbSql = "SELECT * FROM tmp";
-    assertQuery(
-        icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
-  }
+TEST_P(IcebergReadEqualityDeleteTest, deleteFirstAndLastRows) {
+  testDeleteFirstAndLastRows();
 }
 
-TEST_F(
-    IcebergReadEqualityDeleteTest,
-    equalityDeletesFloatAndDoubleThrowsError) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  // Test for float (REAL)
-  {
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    std::unordered_map<int8_t, std::vector<std::vector<float>>>
-        equalityDeleteVectorMap;
-    equalityFieldIdsMap.insert({{0, {1}}, {1, {2}}});
-    equalityDeleteVectorMap.insert({{0, {{0, 1}}}, {1, {{2, 3}}}});
-    VELOX_ASSERT_THROW(
-        assertEqualityDeletes<TypeKind::REAL>(
-            equalityDeleteVectorMap, equalityFieldIdsMap),
-        "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c1 : REAL");
-  }
-
-  // Test for float (REAL) - Delete all
-  {
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    std::unordered_map<int8_t, std::vector<std::vector<float>>>
-        equalityDeleteVectorMap;
-    equalityFieldIdsMap.insert({0, {1}});
-    std::vector<float> allValues;
-    for (int i = 0; i < rowCount_; ++i) {
-      allValues.push_back(static_cast<double>(i));
-    }
-    equalityDeleteVectorMap.insert({0, {allValues}});
-    VELOX_ASSERT_THROW(
-        assertEqualityDeletes<TypeKind::REAL>(
-            equalityDeleteVectorMap, equalityFieldIdsMap),
-        "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : REAL");
-  }
-
-  // Test for double (DOUBLE)
-  {
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    std::unordered_map<int8_t, std::vector<std::vector<double>>>
-        equalityDeleteVectorMap;
-    equalityFieldIdsMap.insert({{0, {1}}, {1, {2}}});
-    equalityDeleteVectorMap.insert({{0, {{0, 1}}}, {1, {{2, 3}}}});
-    VELOX_ASSERT_THROW(
-        assertEqualityDeletes<TypeKind::DOUBLE>(
-            equalityDeleteVectorMap, equalityFieldIdsMap),
-        "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c1 : DOUBLE");
-  }
-
-  // Test for double (DOUBLE) - Delete all
-  {
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    std::unordered_map<int8_t, std::vector<std::vector<double>>>
-        equalityDeleteVectorMap;
-    equalityFieldIdsMap.insert({0, {1}});
-    std::vector<double> allValues;
-    for (int i = 0; i < rowCount_; ++i) {
-      allValues.push_back(static_cast<double>(i));
-    }
-    equalityDeleteVectorMap.insert({0, {allValues}});
-    VELOX_ASSERT_THROW(
-        assertEqualityDeletes<TypeKind::DOUBLE>(
-            equalityDeleteVectorMap, equalityFieldIdsMap),
-        "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : DOUBLE");
-  }
+TEST_P(IcebergReadEqualityDeleteTest, deleteRandomRows) {
+  testDeleteRandomRows();
 }
 
-TEST_F(IcebergReadEqualityDeleteTest, equalityDeletesLongDecimal) {
-  folly::SingletonVault::singleton()->registrationComplete();
-
-  // Use DECIMAL(25, 5) for long decimal (precision 25, scale 5)
-  auto decimalType = DECIMAL(25, 5);
-  std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-  std::unordered_map<int8_t, std::vector<std::vector<int128_t>>>
-      equalityDeleteVectorMap;
-  equalityFieldIdsMap.insert({0, {1}});
-
-  // Values: 123456789012345 (represents 1234567.89012), 987654321098765
-  // (represents 9876543.21098)
-  equalityDeleteVectorMap.insert(
-      {0, {{int128_t(123456789012345), int128_t(987654321098765)}}});
-  std::vector<RowVectorPtr> dataVectors = {makeRowVector(
-      {"c0"},
-      {makeFlatVector<int128_t>(
-          {(123456789012345),
-           (987654321098765),
-           (111111111111111),
-           (222222222222222),
-           (333333333333333)},
-          decimalType)})};
-
-  VELOX_ASSERT_THROW(
-      assertEqualityDeletes<TypeKind::HUGEINT>(
-          equalityDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp WHERE c0 NOT IN (123456789012345, 987654321098765)",
-          dataVectors),
-      "Decimal is not supported for DWRF.");
-
-  // Delete all
-  equalityDeleteVectorMap.clear();
-  equalityDeleteVectorMap.insert(
-      {0,
-       {{123456789012345,
-         987654321098765,
-         111111111111111,
-         222222222222222,
-         333333333333333}}});
-
-  VELOX_ASSERT_THROW(
-      assertEqualityDeletes<TypeKind::HUGEINT>(
-          equalityDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp WHERE 1 = 0",
-          dataVectors),
-      "Decimal is not supported for DWRF.");
-
-  // Delete none
-  equalityDeleteVectorMap.clear();
-  equalityDeleteVectorMap.insert({0, {{}}});
-  VELOX_ASSERT_THROW(
-      assertEqualityDeletes<TypeKind::HUGEINT>(
-          equalityDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp",
-          dataVectors),
-      "Decimal is not supported for DWRF.");
+TEST_P(IcebergReadEqualityDeleteTest, deleteAllRows) {
+  testDeleteAllRows();
 }
 
-class IcebergReadEqualityDeletesParameterizedTest
-    : public IcebergReadEqualityDeleteTest,
-      public testing::WithParamInterface<TypeKind> {
- public:
-  template <TypeKind KIND>
-  void testSingleColumnEqualityDeletes() {
-    folly::SingletonVault::singleton()->registrationComplete();
-    using T = typename TypeTraits<KIND>::NativeType;
-
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    std::unordered_map<int8_t, std::vector<std::vector<T>>>
-        equalityDeleteVectorMap;
-    equalityFieldIdsMap.insert({0, {1}});
-
-    // Test 1: Delete first and last rows
-    equalityDeleteVectorMap.clear();
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      auto dataVectors = makeVectors<KIND>(1, rowCount_, 1);
-      auto flatVector =
-          dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-      std::vector<StringView> deleteValues = {
-          flatVector->valueAt(0), flatVector->valueAt(rowCount_ - 1)};
-      equalityDeleteVectorMap.insert({0, {deleteValues}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-    } else if constexpr (std::is_integral_v<T>) {
-      equalityDeleteVectorMap.insert(
-          {0, {{static_cast<T>(0), static_cast<T>(rowCount_ - 1)}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-    }
-
-    // Test 2: Delete none (empty delete vector)
-    equalityDeleteVectorMap.clear();
-    equalityDeleteVectorMap.insert({0, {{}}});
-    assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-
-    // Test 3: Delete all rows
-    equalityDeleteVectorMap.clear();
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      auto dataVectors = makeVectors<KIND>(1, rowCount_, 1);
-      auto flatVector =
-          dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-      std::vector<StringView> deleteValues;
-      deleteValues.reserve(rowCount_);
-      for (int i = 0; i < rowCount_; ++i) {
-        deleteValues.push_back(flatVector->valueAt(i));
-      }
-      equalityDeleteVectorMap.insert({0, {deleteValues}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-    } else if constexpr (std::is_integral_v<T>) {
-      equalityDeleteVectorMap.insert({0, {makeSequenceValues<T>(rowCount_)}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-    }
-
-    // Test 4: Delete random rows
-    equalityDeleteVectorMap.clear();
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      auto dataVectors = makeVectors<KIND>(1, rowCount_, 1);
-      auto flatVector =
-          dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-      auto randomIndices = makeRandomDeleteValues(rowCount_);
-      std::vector<StringView> deleteValues;
-      for (auto idx : randomIndices) {
-        deleteValues.push_back(flatVector->valueAt(idx));
-      }
-      equalityDeleteVectorMap.insert({0, {deleteValues}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-    } else if constexpr (std::is_integral_v<T>) {
-      std::vector<T> deleteValues;
-      auto randomIndices = makeRandomDeleteValues(rowCount_);
-      for (auto idx : randomIndices) {
-        deleteValues.push_back(static_cast<T>(idx));
-      }
-      equalityDeleteVectorMap.insert({0, {deleteValues}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-    }
-
-    // Test 5: Delete rows that don't exist
-    equalityDeleteVectorMap.clear();
-    if constexpr (std::is_integral_v<T>) {
-      equalityDeleteVectorMap.insert(
-          {0, {{static_cast<T>(rowCount_), static_cast<T>(rowCount_ + 1)}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-    } else if constexpr (
-        KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      std::vector<StringView> deleteValues = {
-          StringView("nonexistent1"), StringView("nonexistent2")};
-      equalityDeleteVectorMap.insert({0, {deleteValues}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-    }
-
-    // Test short decimal scenarios when KIND is BIGINT
-    if constexpr (KIND == TypeKind::BIGINT) {
-      // Use DECIMAL(6, 2) for short decimal (precision 6, scale 2)
-      auto decimalType = DECIMAL(6, 2);
-      std::unordered_map<int8_t, std::vector<std::vector<int64_t>>>
-          shortDecimalDeleteVectorMap;
-
-      // Test 1: Delete first and last short decimal values
-      shortDecimalDeleteVectorMap.clear();
-      shortDecimalDeleteVectorMap.insert({0, {{123456, 789012}}});
-      std::vector<RowVectorPtr> shortDecimalDataVectors = {makeRowVector(
-          {"c0"},
-          {makeFlatVector<int64_t>(
-              {123456, 789012, 345678, 901234, 567890}, decimalType)})};
-
-      assertEqualityDeletes<TypeKind::BIGINT>(
-          shortDecimalDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp WHERE c0 NOT IN (1234.56, 7890.12)",
-          shortDecimalDataVectors);
-
-      // Test 2: Delete all short decimal values
-      shortDecimalDeleteVectorMap.clear();
-      shortDecimalDeleteVectorMap.insert(
-          {0, {{123456, 789012, 345678, 901234, 567890}}});
-      assertEqualityDeletes<TypeKind::BIGINT>(
-          shortDecimalDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp WHERE 1 = 0",
-          shortDecimalDataVectors);
-
-      // Test 3: Delete none (empty short decimal delete vector)
-      shortDecimalDeleteVectorMap.clear();
-      shortDecimalDeleteVectorMap.insert({0, {{}}});
-      assertEqualityDeletes<TypeKind::BIGINT>(
-          shortDecimalDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp",
-          shortDecimalDataVectors);
-    }
-  }
-
-  template <TypeKind KIND>
-  void testTwoColumnEqualityDeletes() {
-    folly::SingletonVault::singleton()->registrationComplete();
-
-    using T = typename TypeTraits<KIND>::NativeType;
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    std::unordered_map<int8_t, std::vector<std::vector<T>>>
-        equalityDeleteVectorMap;
-    equalityFieldIdsMap.insert({0, {1, 2}});
-
-    // Test 1: Delete specific row pairs
-    equalityDeleteVectorMap.clear();
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      auto dataVectors = makeVectors<KIND>(1, rowCount_, 2);
-      auto col0 =
-          dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-      auto col1 =
-          dataVectors[0]->childAt(1)->template as<FlatVector<StringView>>();
-
-      // Delete first two row pairs
-      std::vector<StringView> deleteValuesCol0 = {
-          col0->valueAt(0), col0->valueAt(1)};
-      std::vector<StringView> deleteValuesCol1 = {
-          col1->valueAt(0), col1->valueAt(1)};
-
-      equalityDeleteVectorMap.insert({0, {deleteValuesCol0, deleteValuesCol1}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-    } else if constexpr (std::is_integral_v<T>) {
-      // Delete rows where (c0=0 AND c1=0) and (c0=2 AND c1=1)
-      equalityDeleteVectorMap.insert(
-          {0,
-           {{static_cast<T>(0), static_cast<T>(2)},
-            {static_cast<T>(0), static_cast<T>(1)}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-    }
-
-    // Test 2: Delete none (empty delete vectors)
-    equalityDeleteVectorMap.clear();
-    equalityDeleteVectorMap.insert({0, {{}, {}}});
-    assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-
-    // Test 3: Delete all rows
-    equalityDeleteVectorMap.clear();
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      auto dataVectors = makeVectors<KIND>(1, rowCount_, 2);
-      auto col0 =
-          dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-      auto col1 =
-          dataVectors[0]->childAt(1)->template as<FlatVector<StringView>>();
-
-      std::vector<StringView> deleteValuesCol0;
-      std::vector<StringView> deleteValuesCol1;
-      deleteValuesCol0.reserve(rowCount_);
-      deleteValuesCol1.reserve(rowCount_);
-
-      for (int i = 0; i < rowCount_; i++) {
-        deleteValuesCol0.push_back(col0->valueAt(i));
-        deleteValuesCol1.push_back(col1->valueAt(i));
-      }
-
-      equalityDeleteVectorMap.insert({0, {deleteValuesCol0, deleteValuesCol1}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp WHERE 1 = 0",
-          dataVectors);
-    } else if constexpr (std::is_integral_v<T>) {
-      equalityDeleteVectorMap.insert(
-          {0,
-           {makeSequenceValues<T>(rowCount_, 1),
-            makeSequenceValues<T>(rowCount_, 2)}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp WHERE 1 = 0");
-    }
-
-    // Test 4: Delete random row pairs
-    equalityDeleteVectorMap.clear();
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      auto dataVectors = makeVectors<KIND>(1, rowCount_, 2);
-      auto col0 =
-          dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-      auto col1 =
-          dataVectors[0]->childAt(1)->template as<FlatVector<StringView>>();
-
-      auto randomIndices = makeRandomDeleteValues(rowCount_ / 2);
-      std::vector<StringView> deleteValuesCol0;
-      std::vector<StringView> deleteValuesCol1;
-
-      for (auto idx : randomIndices) {
-        deleteValuesCol0.push_back(col0->valueAt(idx));
-        deleteValuesCol1.push_back(col1->valueAt(idx));
-      }
-
-      equalityDeleteVectorMap.insert({0, {deleteValuesCol0, deleteValuesCol1}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-    } else if constexpr (std::is_integral_v<T>) {
-      auto randomIndices = makeRandomDeleteValues(rowCount_ / 2);
-      std::vector<T> deleteValuesCol0;
-      std::vector<T> deleteValuesCol1;
-
-      for (auto idx : randomIndices) {
-        deleteValuesCol0.push_back(static_cast<T>(idx));
-        deleteValuesCol1.push_back(static_cast<T>(idx / 2));
-      }
-
-      equalityDeleteVectorMap.insert({0, {deleteValuesCol0, deleteValuesCol1}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-    }
-
-    // Test 5: Delete non-existent row pairs
-    equalityDeleteVectorMap.clear();
-    if constexpr (std::is_integral_v<T>) {
-      equalityDeleteVectorMap.insert(
-          {0,
-           {{static_cast<T>(rowCount_), static_cast<T>(rowCount_ + 1)},
-            {static_cast<T>(rowCount_), static_cast<T>(rowCount_ + 1)}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-    } else if constexpr (
-        KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      equalityDeleteVectorMap.insert(
-          {0,
-           {{StringView("nonexistent1"), StringView("nonexistent2")},
-            {StringView("nonexistent3"), StringView("nonexistent4")}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-    }
-  }
-
-  template <TypeKind KIND>
-  void testSingleFileMultipleColumnsEqualityDeletes() {
-    folly::SingletonVault::singleton()->registrationComplete();
-
-    using T = typename TypeTraits<KIND>::NativeType;
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    std::unordered_map<int8_t, std::vector<std::vector<T>>>
-        equalityDeleteVectorMap;
-
-    equalityFieldIdsMap.insert({0, {1, 2}});
-
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      // Delete rows 0, 1
-      auto dataVectors = makeVectors<KIND>(1, rowCount_, 2);
-      auto col0 =
-          dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-      auto col1 =
-          dataVectors[0]->childAt(1)->template as<FlatVector<StringView>>();
-      std::vector<StringView> deleteValuesCol0 = {
-          col0->valueAt(0), col0->valueAt(1)};
-      std::vector<StringView> deleteValuesCol1 = {
-          col1->valueAt(0), col1->valueAt(1)};
-      equalityDeleteVectorMap.insert({0, {deleteValuesCol0, deleteValuesCol1}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-
-      // Delete rows 0, 2, 4, 6
-      equalityDeleteVectorMap.clear();
-      dataVectors = makeVectors<KIND>(1, rowCount_, 2);
-      col0 = dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-      col1 = dataVectors[0]->childAt(1)->template as<FlatVector<StringView>>();
-      deleteValuesCol0 = {
-          col0->valueAt(0),
-          col0->valueAt(2),
-          col0->valueAt(4),
-          col0->valueAt(6)};
-      deleteValuesCol1 = {
-          col1->valueAt(0),
-          col1->valueAt(2),
-          col1->valueAt(4),
-          col1->valueAt(6)};
-      equalityDeleteVectorMap.insert({0, {deleteValuesCol0, deleteValuesCol1}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-
-      // Delete the last row
-      equalityDeleteVectorMap.clear();
-      dataVectors = makeVectors<KIND>(1, rowCount_, 2);
-      col0 = dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-      col1 = dataVectors[0]->childAt(1)->template as<FlatVector<StringView>>();
-      deleteValuesCol0 = {col0->valueAt(rowCount_ - 1)};
-      deleteValuesCol1 = {col1->valueAt(rowCount_ - 1)};
-      equalityDeleteVectorMap.insert({0, {deleteValuesCol0, deleteValuesCol1}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-
-      // Delete non-existent values
-      equalityDeleteVectorMap.clear();
-      dataVectors = makeVectors<KIND>(1, rowCount_, 2);
-      deleteValuesCol0 = {
-          StringView("nonexistent1"), StringView("nonexistent2")};
-      deleteValuesCol1 = {
-          StringView("nonexistent3"), StringView("nonexistent4")};
-      equalityDeleteVectorMap.insert({0, {deleteValuesCol0, deleteValuesCol1}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-
-      // Delete 0 values
-      equalityDeleteVectorMap.clear();
-      dataVectors = makeVectors<KIND>(1, rowCount_, 2);
-      equalityDeleteVectorMap.insert({0, {{}, {}}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-
-      // Delete all values
-      equalityDeleteVectorMap.clear();
-      dataVectors = makeVectors<KIND>(1, rowCount_, 2);
-      col0 = dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-      col1 = dataVectors[0]->childAt(1)->template as<FlatVector<StringView>>();
-      deleteValuesCol0.clear();
-      deleteValuesCol1.clear();
-      deleteValuesCol0.reserve(rowCount_);
-      deleteValuesCol1.reserve(rowCount_);
-      for (int i = 0; i < rowCount_; i++) {
-        deleteValuesCol0.push_back(col0->valueAt(i));
-        deleteValuesCol1.push_back(col1->valueAt(i));
-      }
-      equalityDeleteVectorMap.insert({0, {deleteValuesCol0, deleteValuesCol1}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp WHERE 1 = 0",
-          dataVectors);
-    } else if constexpr (std::is_integral_v<T>) {
-      // Delete rows 0, 1
-      equalityDeleteVectorMap.insert(
-          {0,
-           {{static_cast<T>(0), static_cast<T>(1)},
-            {static_cast<T>(0), static_cast<T>(0)}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-
-      // Delete rows 0, 2, 4, 6
-      equalityDeleteVectorMap.clear();
-      equalityDeleteVectorMap.insert(
-          {0,
-           {{static_cast<T>(0),
-             static_cast<T>(2),
-             static_cast<T>(4),
-             static_cast<T>(6)},
-            {static_cast<T>(0),
-             static_cast<T>(1),
-             static_cast<T>(2),
-             static_cast<T>(3)}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-
-      // Delete the last row
-      equalityDeleteVectorMap.clear();
-      equalityDeleteVectorMap.insert(
-          {0,
-           {{static_cast<T>(rowCount_ - 1)},
-            {static_cast<T>((rowCount_ - 1) / 2)}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-
-      // Delete non-existent values
-      equalityDeleteVectorMap.clear();
-      equalityDeleteVectorMap.insert(
-          {0,
-           {{static_cast<T>(rowCount_), static_cast<T>(rowCount_ + 1000)},
-            {static_cast<T>(rowCount_ / 2), static_cast<T>(1500)}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-
-      // Delete 0 values
-      equalityDeleteVectorMap.clear();
-      equalityDeleteVectorMap.insert({0, {{}, {}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-
-      // Delete all values
-      equalityDeleteVectorMap.clear();
-      equalityDeleteVectorMap.insert(
-          {0,
-           {makeSequenceValues<T>(rowCount_),
-            makeSequenceValues<T>(rowCount_, 2)}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp WHERE 1 = 0");
-    }
-  }
-
-  template <TypeKind KIND>
-  void testMultipleFileMultipleColumnEqualityDeletes() {
-    folly::SingletonVault::singleton()->registrationComplete();
-
-    using T = typename TypeTraits<KIND>::NativeType;
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    std::unordered_map<int8_t, std::vector<std::vector<T>>>
-        equalityDeleteVectorMap;
-
-    // Test 1: Delete rows {0, 1} from c0, {2, 3} from c1, with two equality
-    // delete files
-    equalityFieldIdsMap.clear();
-    equalityDeleteVectorMap.clear();
-    equalityFieldIdsMap.insert({{0, {1}}, {1, {2}}});
-
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      auto dataVectors = makeVectors<KIND>(1, rowCount_, 2);
-      auto col0 =
-          dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-      auto col1 =
-          dataVectors[0]->childAt(1)->template as<FlatVector<StringView>>();
-
-      // Delete file 0: delete values from column 0 (indices 0, 1)
-      std::vector<StringView> deleteValuesCol0 = {
-          col0->valueAt(0), col0->valueAt(1)};
-
-      // Delete file 1: delete values from column 1 (indices 2, 3)
-      std::vector<StringView> deleteValuesCol1 = {
-          col1->valueAt(2), col1->valueAt(3)};
-
-      equalityDeleteVectorMap.insert(
-          {{0, {deleteValuesCol0}}, {1, {deleteValuesCol1}}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-    } else if constexpr (std::is_integral_v<T>) {
-      // Delete file 0: delete rows where c0 in {0, 1}
-      // Delete file 1: delete rows where c1 in {2, 3} (which corresponds to
-      // rows 4, 5, 6, 7)
-      equalityDeleteVectorMap.insert(
-          {{0, {{static_cast<T>(0), static_cast<T>(1)}}},
-           {1, {{static_cast<T>(2), static_cast<T>(3)}}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-    }
-
-    // Test 2: Delete no values (empty delete vectors for both files)
-    equalityDeleteVectorMap.clear();
-    equalityDeleteVectorMap.insert({{0, {{}}}, {1, {{}}}});
-    assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-
-    // Test 3: Delete all values
-    equalityDeleteVectorMap.clear();
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      auto dataVectors = makeVectors<KIND>(1, rowCount_, 2);
-      auto col0 =
-          dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-      auto col1 =
-          dataVectors[0]->childAt(1)->template as<FlatVector<StringView>>();
-
-      // Collect all unique values from column 0
-      std::set<std::string> uniqueCol0Values;
-      std::set<std::string> uniqueCol1Values;
-      for (int i = 0; i < rowCount_; i++) {
-        uniqueCol0Values.insert(std::string(col0->valueAt(i)));
-        uniqueCol1Values.insert(std::string(col1->valueAt(i)));
-      }
-
-      std::vector<StringView> deleteValuesCol0;
-      std::vector<StringView> deleteValuesCol1;
-
-      for (const auto& value : uniqueCol0Values) {
-        deleteValuesCol0.push_back(StringView(value));
-      }
-      for (const auto& value : uniqueCol1Values) {
-        deleteValuesCol1.push_back(StringView(value));
-      }
-
-      equalityDeleteVectorMap.insert(
-          {{0, {deleteValuesCol0}}, {1, {deleteValuesCol1}}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp WHERE 1 = 0",
-          dataVectors);
-    } else if constexpr (std::is_integral_v<T>) {
-      // Delete all unique values from both columns
-      equalityDeleteVectorMap.insert(
-          {{0, {makeSequenceValues<T>(rowCount_)}},
-           {1, {makeSequenceValues<T>(rowCount_, 2)}}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp WHERE 1 = 0");
-    }
-
-    // Test 4: Delete overlapping values from both files
-    equalityDeleteVectorMap.clear();
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      auto dataVectors = makeVectors<KIND>(1, rowCount_, 2);
-      auto col0 =
-          dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-      auto col1 =
-          dataVectors[0]->childAt(1)->template as<FlatVector<StringView>>();
-
-      // Delete file 0: delete some values from column 0
-      std::vector<StringView> deleteValuesCol0 = {
-          col0->valueAt(0), col0->valueAt(2), col0->valueAt(4)};
-
-      // Delete file 1: delete overlapping values from column 1
-      std::vector<StringView> deleteValuesCol1 = {
-          col1->valueAt(1), col1->valueAt(2), col1->valueAt(5)};
-
-      equalityDeleteVectorMap.insert(
-          {{0, {deleteValuesCol0}}, {1, {deleteValuesCol1}}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-    } else if constexpr (std::is_integral_v<T>) {
-      // Delete file 0: delete some values from column 0
-      // Delete file 1: delete some overlapping values from column 1
-      auto randomIndices1 = makeRandomDeleteValues(rowCount_ / 4);
-      auto randomIndices2 = makeRandomDeleteValues(rowCount_ / 4);
-
-      std::vector<T> deleteValuesCol0;
-      std::vector<T> deleteValuesCol1;
-
-      for (auto idx : randomIndices1) {
-        deleteValuesCol0.push_back(static_cast<T>(idx));
-      }
-
-      for (auto idx : randomIndices2) {
-        deleteValuesCol1.push_back(static_cast<T>(idx / 2));
-      }
-
-      equalityDeleteVectorMap.insert(
-          {{0, {deleteValuesCol0}}, {1, {deleteValuesCol1}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-    }
-
-    // Test 5: Delete non-existent values from both files
-    equalityDeleteVectorMap.clear();
-    if constexpr (std::is_integral_v<T>) {
-      equalityDeleteVectorMap.insert(
-          {{0, {{static_cast<T>(rowCount_), static_cast<T>(rowCount_ + 1)}}},
-           {1,
-            {{static_cast<T>(rowCount_ + 2), static_cast<T>(rowCount_ + 3)}}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-    } else if constexpr (
-        KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      equalityDeleteVectorMap.insert(
-          {{0, {{StringView("nonexistent1"), StringView("nonexistent2")}}},
-           {1, {{StringView("nonexistent3"), StringView("nonexistent4")}}}});
-      assertEqualityDeletes<KIND>(equalityDeleteVectorMap, equalityFieldIdsMap);
-    }
-  }
-
-  template <TypeKind KIND>
-  void testAllNullsEqualityDeletes() {
-    folly::SingletonVault::singleton()->registrationComplete();
-    using T = typename TypeTraits<KIND>::NativeType;
-
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    std::unordered_map<int8_t, std::vector<std::vector<T>>>
-        equalityDeleteVectorMap;
-    equalityFieldIdsMap.insert({0, {1}});
-
-    // Test with all-null data vectors
-    auto dataVectors = makeVectors<KIND>(1, rowCount_, 1, true, false);
-
-    // Since all values are null, delete operations should not match anything
-    equalityDeleteVectorMap.clear();
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      std::vector<StringView> deleteValues = {
-          StringView("apple"), StringView("banana")};
-      equalityDeleteVectorMap.insert({0, {deleteValues}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp",
-          dataVectors);
-    } else if constexpr (std::is_integral_v<T>) {
-      equalityDeleteVectorMap.insert(
-          {0, {{static_cast<T>(0), static_cast<T>(1)}}});
-      assertEqualityDeletes<KIND>(
-          equalityDeleteVectorMap,
-          equalityFieldIdsMap,
-          "SELECT * FROM tmp",
-          dataVectors);
-    }
-  }
-
-  template <TypeKind KIND>
-  void testPartialNullsEqualityDeletes() {
-    folly::SingletonVault::singleton()->registrationComplete();
-    using T = typename TypeTraits<KIND>::NativeType;
-
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    std::unordered_map<int8_t, std::vector<std::vector<T>>>
-        equalityDeleteVectorMap;
-    equalityFieldIdsMap.insert({0, {1}});
-
-    // Test with partial-null data vectors (20% nulls)
-    auto dataVectors = makeVectors<KIND>(1, rowCount_, 1, false, true);
-
-    // Delete some actual values that should exist in the non-null positions
-    equalityDeleteVectorMap.clear();
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      auto flatVector =
-          dataVectors[0]->childAt(0)->template as<FlatVector<StringView>>();
-
-      // Find a few non-null values to delete
-      std::vector<StringView> deleteValues;
-      for (vector_size_t i = 0; i < rowCount_ && deleteValues.size() < 5; ++i) {
-        if (!flatVector->isNullAt(i)) {
-          deleteValues.push_back(flatVector->valueAt(i));
-        }
-      }
-
-      if (!deleteValues.empty()) {
-        equalityDeleteVectorMap.insert({0, {deleteValues}});
-        assertEqualityDeletes<KIND>(
-            equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-      }
-    } else if constexpr (std::is_integral_v<T>) {
-      auto flatVector =
-          dataVectors[0]->childAt(0)->template as<FlatVector<T>>();
-
-      // Find a few non-null values to delete
-      std::vector<T> deleteValues;
-      for (vector_size_t i = 0; i < rowCount_ && deleteValues.size() < 5; ++i) {
-        if (!flatVector->isNullAt(i)) {
-          deleteValues.push_back(flatVector->valueAt(i));
-        }
-      }
-
-      if (!deleteValues.empty()) {
-        equalityDeleteVectorMap.insert({0, {deleteValues}});
-        assertEqualityDeletes<KIND>(
-            equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-      }
-    }
-  }
-
-  template <TypeKind KIND>
-  void testMixedNullTypesEqualityDeletes() {
-    folly::SingletonVault::singleton()->registrationComplete();
-    using T = typename TypeTraits<KIND>::NativeType;
-
-    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
-    std::unordered_map<int8_t, std::vector<std::vector<T>>>
-        equalityDeleteVectorMap;
-    equalityFieldIdsMap.insert({0, {1, 2}});
-
-    // Test with different null patterns for each column
-    // Column 0: all nulls, Column 1: partial nulls
-    auto allNullVectors = makeVectors<KIND>(1, rowCount_, 1, true, false);
-    auto partialNullVectors = makeVectors<KIND>(1, rowCount_, 1, false, true);
-
-    // Combine the vectors to create a mixed scenario
-    std::vector<VectorPtr> combinedVectors = {
-        allNullVectors[0]->childAt(0), partialNullVectors[0]->childAt(0)};
-
-    std::vector<std::string> names = {"c0", "c1"};
-    auto combinedRowVector = makeRowVector(names, combinedVectors);
-    std::vector<RowVectorPtr> dataVectors = {combinedRowVector};
-
-    // Delete operations should only affect the partial null column
-    equalityDeleteVectorMap.clear();
-    if constexpr (KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-      auto col1FlatVector = partialNullVectors[0]
-                                ->childAt(0)
-                                ->template as<FlatVector<StringView>>();
-
-      // Find non-null values from column 1 to delete
-      std::vector<StringView> deleteValuesCol0; // Empty for all-null column
-      std::vector<StringView> deleteValuesCol1;
-
-      for (vector_size_t i = 0; i < rowCount_ && deleteValuesCol1.size() < 3;
-           ++i) {
-        if (!col1FlatVector->isNullAt(i)) {
-          deleteValuesCol1.push_back(col1FlatVector->valueAt(i));
-        }
-      }
-
-      if (!deleteValuesCol1.empty()) {
-        equalityDeleteVectorMap.insert(
-            {0, {deleteValuesCol0, deleteValuesCol1}});
-        assertEqualityDeletes<KIND>(
-            equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-      }
-    } else if constexpr (std::is_integral_v<T>) {
-      auto col1FlatVector =
-          partialNullVectors[0]->childAt(0)->template as<FlatVector<T>>();
-
-      // Find non-null values from column 1 to delete
-      std::vector<T> deleteValuesCol0; // Empty for all-null column
-      std::vector<T> deleteValuesCol1;
-
-      for (vector_size_t i = 0; i < rowCount_ && deleteValuesCol1.size() < 3;
-           ++i) {
-        if (!col1FlatVector->isNullAt(i)) {
-          deleteValuesCol1.push_back(col1FlatVector->valueAt(i));
-        }
-      }
-
-      if (!deleteValuesCol1.empty()) {
-        equalityDeleteVectorMap.insert(
-            {0, {deleteValuesCol0, deleteValuesCol1}});
-        assertEqualityDeletes<KIND>(
-            equalityDeleteVectorMap, equalityFieldIdsMap, "", dataVectors);
-      }
-    }
-  }
-};
-
-TEST_P(
-    IcebergReadEqualityDeletesParameterizedTest,
-    singleColumnEqualityDeletes) {
-  TypeKind typeKind = GetParam();
-  VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(testSingleColumnEqualityDeletes, typeKind);
-}
-
-TEST_P(IcebergReadEqualityDeletesParameterizedTest, twoColumnEqualityDeletes) {
-  TypeKind typeKind = GetParam();
-  VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(testTwoColumnEqualityDeletes, typeKind);
-}
-
-TEST_P(
-    IcebergReadEqualityDeletesParameterizedTest,
-    singleFileMultipleColumnsEqualityDeletes) {
-  TypeKind typeKind = GetParam();
-  VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(
-      testSingleFileMultipleColumnsEqualityDeletes, typeKind);
-}
-
-TEST_P(
-    IcebergReadEqualityDeletesParameterizedTest,
-    multipleFileEqualityDeletes) {
-  TypeKind typeKind = GetParam();
-  VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(
-      testMultipleFileMultipleColumnEqualityDeletes, typeKind);
-}
-
-TEST_P(IcebergReadEqualityDeletesParameterizedTest, allNullsEqualityDeletes) {
-  TypeKind typeKind = GetParam();
-  VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(testAllNullsEqualityDeletes, typeKind);
-}
-
-TEST_P(
-    IcebergReadEqualityDeletesParameterizedTest,
-    partialNullsEqualityDeletes) {
-  TypeKind typeKind = GetParam();
-  VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(testPartialNullsEqualityDeletes, typeKind);
-}
-
-TEST_P(
-    IcebergReadEqualityDeletesParameterizedTest,
-    mixedNullTypesEqualityDeletes) {
-  TypeKind typeKind = GetParam();
-  VELOX_DYNAMIC_SCALAR_TYPE_DISPATCH(
-      testMixedNullTypesEqualityDeletes, typeKind);
+TEST_P(IcebergReadEqualityDeleteTest, deleteNoRows) {
+  testDeleteNoRows();
 }
 
 INSTANTIATE_TEST_SUITE_P(
     AllTypes,
-    IcebergReadEqualityDeletesParameterizedTest,
+    IcebergReadEqualityDeleteTest,
     testing::Values(
-        TypeKind::TINYINT,
-        TypeKind::SMALLINT,
-        TypeKind::INTEGER,
-        TypeKind::BIGINT,
-        TypeKind::VARCHAR,
-        TypeKind::VARBINARY),
-    [](const testing::TestParamInfo<TypeKind>& info) {
-      return mapTypeKindToName(info.param);
+        // Single row tests - No nulls
+        TestParams{{TypeKind::TINYINT}, {NullParam::kNoNulls}},
+        TestParams{{TypeKind::SMALLINT}, {NullParam::kNoNulls}},
+        TestParams{{TypeKind::INTEGER}, {NullParam::kNoNulls}},
+        TestParams{{TypeKind::BIGINT}, {NullParam::kNoNulls}},
+        TestParams{{TypeKind::VARCHAR}, {NullParam::kNoNulls}},
+        TestParams{{TypeKind::VARBINARY}, {NullParam::kNoNulls}},
+
+        // Single row tests - Partial nulls
+        TestParams{{TypeKind::TINYINT}, {NullParam::kPartialNulls}},
+        TestParams{{TypeKind::SMALLINT}, {NullParam::kPartialNulls}},
+        TestParams{{TypeKind::INTEGER}, {NullParam::kPartialNulls}},
+        TestParams{{TypeKind::BIGINT}, {NullParam::kPartialNulls}},
+        TestParams{{TypeKind::VARCHAR}, {NullParam::kPartialNulls}},
+        TestParams{{TypeKind::VARBINARY}, {NullParam::kPartialNulls}},
+
+        // Single row tests - All nulls
+        TestParams{{TypeKind::TINYINT}, {NullParam::kAllNulls}},
+        TestParams{{TypeKind::SMALLINT}, {NullParam::kAllNulls}},
+        TestParams{{TypeKind::INTEGER}, {NullParam::kAllNulls}},
+        TestParams{{TypeKind::BIGINT}, {NullParam::kAllNulls}},
+        TestParams{{TypeKind::VARCHAR}, {NullParam::kAllNulls}},
+        TestParams{{TypeKind::VARBINARY}, {NullParam::kAllNulls}},
+
+        // Test for float and real - for floatAndDoubleThrowsError test
+        TestParams{{TypeKind::REAL}, {NullParam::kNoNulls}},
+        TestParams{{TypeKind::DOUBLE}, {NullParam::kNoNulls}},
+
+        // Multiple row tests - No nulls (two same-type columns)
+        TestParams{
+            {TypeKind::TINYINT, TypeKind::TINYINT},
+            {NullParam::kNoNulls, NullParam::kNoNulls}},
+        TestParams{
+            {TypeKind::SMALLINT, TypeKind::SMALLINT},
+            {NullParam::kNoNulls, NullParam::kNoNulls}},
+        TestParams{
+            {TypeKind::INTEGER, TypeKind::INTEGER},
+            {NullParam::kNoNulls, NullParam::kNoNulls}},
+        TestParams{
+            {TypeKind::BIGINT, TypeKind::BIGINT},
+            {NullParam::kNoNulls, NullParam::kNoNulls}},
+        TestParams{
+            {TypeKind::VARCHAR, TypeKind::VARCHAR},
+            {NullParam::kNoNulls, NullParam::kNoNulls}},
+        TestParams{
+            {TypeKind::VARBINARY, TypeKind::VARBINARY},
+            {NullParam::kNoNulls, NullParam::kNoNulls}},
+
+        // Multiple row tests - Partial nulls (two same-type columns)
+        TestParams{
+            {TypeKind::TINYINT, TypeKind::TINYINT},
+            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
+        TestParams{
+            {TypeKind::SMALLINT, TypeKind::SMALLINT},
+            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
+        TestParams{
+            {TypeKind::INTEGER, TypeKind::INTEGER},
+            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
+        TestParams{
+            {TypeKind::BIGINT, TypeKind::BIGINT},
+            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
+        TestParams{
+            {TypeKind::VARCHAR, TypeKind::VARCHAR},
+            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
+        TestParams{
+            {TypeKind::VARBINARY, TypeKind::VARBINARY},
+            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
+
+        // Multiple row tests - All nulls (two same-type columns)
+        TestParams{
+            {TypeKind::TINYINT, TypeKind::TINYINT},
+            {NullParam::kAllNulls, NullParam::kAllNulls}},
+        TestParams{
+            {TypeKind::SMALLINT, TypeKind::SMALLINT},
+            {NullParam::kAllNulls, NullParam::kAllNulls}},
+        TestParams{
+            {TypeKind::INTEGER, TypeKind::INTEGER},
+            {NullParam::kAllNulls, NullParam::kAllNulls}},
+        TestParams{
+            {TypeKind::BIGINT, TypeKind::BIGINT},
+            {NullParam::kAllNulls, NullParam::kAllNulls}},
+        TestParams{
+            {TypeKind::VARCHAR, TypeKind::VARCHAR},
+            {NullParam::kAllNulls, NullParam::kAllNulls}},
+        TestParams{
+            {TypeKind::VARBINARY, TypeKind::VARBINARY},
+            {NullParam::kAllNulls, NullParam::kAllNulls}},
+
+        // Mixed type tests (from former MixedTypeTestParams)
+        // Two column tests with the same types but different nulls
+        TestParams{
+            {TypeKind::BIGINT, TypeKind::BIGINT},
+            {NullParam::kNoNulls, NullParam::kPartialNulls}},
+        // Mixed type tests with TINYINT and VARCHAR
+        TestParams{
+            {TypeKind::TINYINT, TypeKind::VARCHAR},
+            {NullParam::kNoNulls, NullParam::kNoNulls}},
+        TestParams{
+            {TypeKind::TINYINT, TypeKind::VARCHAR},
+            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
+        // Mixed type tests with INTEGER and VARCHAR
+        TestParams{
+            {TypeKind::INTEGER, TypeKind::VARCHAR},
+            {NullParam::kNoNulls, NullParam::kNoNulls}},
+        TestParams{
+            {TypeKind::INTEGER, TypeKind::VARCHAR},
+            {NullParam::kPartialNulls, NullParam::kNoNulls}},
+        TestParams{
+            {TypeKind::INTEGER, TypeKind::VARCHAR},
+            {NullParam::kNoNulls, NullParam::kPartialNulls}},
+        TestParams{
+            {TypeKind::INTEGER, TypeKind::VARCHAR},
+            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
+        // Mixed type tests with SMALLINT and VARBINARY
+        TestParams{
+            {TypeKind::SMALLINT, TypeKind::VARBINARY},
+            {NullParam::kNoNulls, NullParam::kNoNulls}},
+        TestParams{
+            {TypeKind::SMALLINT, TypeKind::VARBINARY},
+            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
+        // Three column mixed type tests
+        TestParams{
+            {TypeKind::INTEGER, TypeKind::VARCHAR, TypeKind::BIGINT},
+            {NullParam::kNoNulls,
+             NullParam::kPartialNulls,
+             NullParam::kNoNulls}}),
+    [](const testing::TestParamInfo<TestParams>& info) {
+      return testParamsToString(info.param);
     });
+
 } // namespace facebook::velox::connector::hive::iceberg

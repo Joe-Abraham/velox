@@ -36,6 +36,9 @@ class IcebergReadPositionalDeleteTest : public IcebergTestBase {
 #endif
   }
 
+ private:
+  RowTypePtr rowType_{ROW({"c0"}, {BIGINT()})};
+
  protected:
   /// Create 1 base data file data_file_1 with 2 RowGroups of 10000 rows each.
   /// Also create 1 delete file delete_file_1 which contains delete positions
