@@ -157,13 +157,178 @@ class IcebergReadEqualityDeletes : public IcebergReadTestBase,
       bool partialNull = false) {
     using T = typename TypeTraits<KIND>::NativeType;
 
-    // Sample strings for VARCHAR data generation
-    const std::vector<std::string> sampleStrings = {
-        "apple",     "banana",     "cherry",    "date",       "elderberry",
-        "fig",       "grape",      "honeydew",  "kiwi",       "lemon",
-        "mango",     "nectarine",  "orange",    "papaya",     "quince",
-        "raspberry", "strawberry", "tangerine", "watermelon", "zucchini"};
+  /// Generate test data vectors for mixed row types with per-column null patterns
+  std::vector<RowVectorPtr> makeVectorsWithMixedTypes(
+      int32_t count,
+      int32_t rowsPerVector,
+      const RowTypePtr& rowType,
+      const std::vector<NullParam>& nullParams) {
+    VELOX_CHECK_EQ(rowType->size(), nullParams.size());
+    
+    std::vector<RowVectorPtr> rowVectors;
+    std::vector<std::string> names = rowType->names();
+    std::vector<TypePtr> types = rowType->children();
+    
+    for (int i = 0; i < count; i++) {
+      std::vector<VectorPtr> vectors;
+      
+      for (size_t j = 0; j < rowType->size(); j++) {
+        auto type = rowType->childAt(j);
+        auto nullParam = nullParams[j];
+        
+        VectorPtr columnVector = createColumnVector(type, rowsPerVector, j, nullParam);
+        vectors.push_back(columnVector);
+      }
+      
+      rowVectors.push_back(makeRowVector(names, vectors));
+    }
+    
+    return rowVectors;
+  }
 
+ private:
+  /// Create a single column vector based on type and null pattern
+  VectorPtr createColumnVector(const TypePtr& type, int32_t rowsPerVector, size_t columnIndex, NullParam nullParam) {
+    // Sample strings for VARCHAR/VARBINARY data generation
+    const std::vector<std::string> sampleStrings = {
+        "apple", "banana", "cherry", "date", "elderberry",
+        "fig", "grape", "honeydew", "kiwi", "lemon",
+        "mango", "nectarine", "orange", "papaya", "quince",
+        "raspberry", "strawberry", "tangerine", "watermelon", "zucchini"
+    };
+
+    VectorPtr columnVector;
+    
+    if (nullParam == NullParam::kAllNulls) {
+      // Create all-null vector based on type
+      switch (type->kind()) {
+        case TypeKind::TINYINT:
+          columnVector = vectorMaker_.allNullFlatVector<int8_t>(rowsPerVector);
+          break;
+        case TypeKind::SMALLINT:
+          columnVector = vectorMaker_.allNullFlatVector<int16_t>(rowsPerVector);
+          break;
+        case TypeKind::INTEGER:
+          columnVector = vectorMaker_.allNullFlatVector<int32_t>(rowsPerVector);
+          break;
+        case TypeKind::BIGINT:
+          columnVector = vectorMaker_.allNullFlatVector<int64_t>(rowsPerVector);
+          break;
+        case TypeKind::REAL:
+          columnVector = vectorMaker_.allNullFlatVector<float>(rowsPerVector);
+          break;
+        case TypeKind::DOUBLE:
+          columnVector = vectorMaker_.allNullFlatVector<double>(rowsPerVector);
+          break;
+        case TypeKind::VARCHAR:
+          columnVector = vectorMaker_.allNullFlatVector<StringView>(rowsPerVector);
+          break;
+        case TypeKind::VARBINARY:
+          columnVector = vectorMaker_.allNullFlatVector<StringView>(rowsPerVector);
+          break;
+        default:
+          VELOX_FAIL("Unsupported type for all-null vector: {}", type->toString());
+      }
+    } else {
+      // Create data-filled vector based on type
+      switch (type->kind()) {
+        case TypeKind::TINYINT: {
+          auto data = makeSequenceValues<int8_t>(rowsPerVector, columnIndex + 1);
+          columnVector = vectorMaker_.flatVector<int8_t>(data);
+          break;
+        }
+        case TypeKind::SMALLINT: {
+          auto data = makeSequenceValues<int16_t>(rowsPerVector, columnIndex + 1);
+          columnVector = vectorMaker_.flatVector<int16_t>(data);
+          break;
+        }
+        case TypeKind::INTEGER: {
+          auto data = makeSequenceValues<int32_t>(rowsPerVector, columnIndex + 1);
+          columnVector = vectorMaker_.flatVector<int32_t>(data);
+          break;
+        }
+        case TypeKind::BIGINT: {
+          auto data = makeSequenceValues<int64_t>(rowsPerVector, columnIndex + 1);
+          columnVector = vectorMaker_.flatVector<int64_t>(data);
+          break;
+        }
+        case TypeKind::REAL: {
+          auto intData = makeSequenceValues<int64_t>(rowsPerVector, columnIndex + 1);
+          std::vector<float> floatData;
+          floatData.reserve(intData.size());
+          for (auto val : intData) {
+            floatData.push_back(static_cast<float>(val) + 0.5f);
+          }
+          columnVector = vectorMaker_.flatVector<float>(floatData);
+          break;
+        }
+        case TypeKind::DOUBLE: {
+          auto intData = makeSequenceValues<int64_t>(rowsPerVector, columnIndex + 1);
+          std::vector<double> doubleData;
+          doubleData.reserve(intData.size());
+          for (auto val : intData) {
+            doubleData.push_back(static_cast<double>(val) + 0.5);
+          }
+          columnVector = vectorMaker_.flatVector<double>(doubleData);
+          break;
+        }
+        case TypeKind::VARCHAR: {
+          auto intData = makeSequenceValues<int64_t>(rowsPerVector, columnIndex + 1);
+          auto stringVector = BaseVector::create<FlatVector<StringView>>(
+              VARCHAR(), rowsPerVector, pool_.get());
+          for (int idx = 0; idx < rowsPerVector; ++idx) {
+            auto stringIndex = intData[idx] % sampleStrings.size();
+            const std::string& selectedString = sampleStrings[stringIndex];
+            stringVector->set(idx, StringView(selectedString));
+          }
+          columnVector = stringVector;
+          break;
+        }
+        case TypeKind::VARBINARY: {
+          auto intData = makeSequenceValues<int64_t>(rowsPerVector, columnIndex + 1);
+          auto binaryVector = BaseVector::create<FlatVector<StringView>>(
+              VARBINARY(), rowsPerVector, pool_.get());
+          for (int idx = 0; idx < rowsPerVector; ++idx) {
+            auto stringIndex = intData[idx] % sampleStrings.size();
+            const std::string& baseString = sampleStrings[stringIndex];
+            std::string binaryStr;
+            for (char c : baseString) {
+              binaryStr += static_cast<unsigned char>(c);
+            }
+            binaryVector->set(idx, StringView(binaryStr));
+          }
+          columnVector = binaryVector;
+          break;
+        }
+        default:
+          VELOX_FAIL("Unsupported type for data vector: {}", type->toString());
+      }
+
+      // Apply partial nulls if specified
+      if (nullParam == NullParam::kPartialNulls) {
+        std::mt19937 gen(42 + columnIndex); // Use column index as seed variation
+        std::uniform_real_distribution<> dis(0.0, 1.0);
+        const double nullProbability = 0.2;
+
+        for (vector_size_t idx = 0; idx < rowsPerVector; ++idx) {
+          if (dis(gen) < nullProbability) {
+            columnVector->setNull(idx, true);
+          }
+        }
+      }
+    }
+    
+    return columnVector;
+  }
+
+ public:
+  /// Generate test data vectors with configurable null patterns (legacy version)
+  template <TypeKind KIND>
+  std::vector<RowVectorPtr> makeVectors(
+      int32_t count,
+      int32_t rowsPerVector,
+      int32_t numColumns = 1,
+      NullParam nullParam = NullParam::kNoNulls) {
     std::vector<TypePtr> types;
     for (int j = 0; j < numColumns; j++) {
       types.push_back(createScalarType<KIND>());
@@ -172,97 +337,27 @@ class IcebergReadEqualityDeletes : public IcebergReadTestBase,
     for (int j = 0; j < numColumns; j++) {
       names.push_back(fmt::format("c{}", j));
     }
+    
+    auto rowType = std::make_shared<RowType>(names, types);
+    std::vector<NullParam> nullParams(numColumns, nullParam);
+    
+    return makeVectorsWithMixedTypes(count, rowsPerVector, rowType, nullParams);
+  }
 
-    std::vector<RowVectorPtr> rowVectors;
-    for (int i = 0; i < count; i++) {
-      std::vector<VectorPtr> vectors;
-
-      // Create the column values like below:
-      // c0 c1 c2
-      //  0  0  0
-      //  1  0  0
-      //  2  1  0
-      //  3  1  1
-      //  4  2  1
-      //  5  2  1
-      //  6  3  2
-      // ...
-      // In the first column c0, the values are continuously increasing and not
-      // repeating. In the second column c1, the values are continuously
-      // increasing and each value repeats once. And so on.
-      for (int j = 0; j < numColumns; j++) {
-        VectorPtr columnVector;
-
-        if (allNulls) {
-          // Use allNullFlatVector for all-null columns
-          columnVector = vectorMaker_.allNullFlatVector<T>(rowsPerVector);
-        } else if constexpr (KIND == TypeKind::VARCHAR) {
-          // For VARCHAR, use sample strings with sequence-based indexing
-          auto intData = makeSequenceValues<int64_t>(rowsPerVector, j + 1);
-          auto stringVector = BaseVector::create<FlatVector<StringView>>(
-              VARCHAR(), rowsPerVector, pool_.get());
-
-          for (int idx = 0; idx < rowsPerVector; ++idx) {
-            auto stringIndex = intData[idx] % sampleStrings.size();
-            const std::string& selectedString = sampleStrings[stringIndex];
-            stringVector->set(idx, StringView(selectedString));
-          }
-          columnVector = stringVector;
-        } else if constexpr (KIND == TypeKind::VARBINARY) {
-          auto intData = makeSequenceValues<int64_t>(rowsPerVector, j + 1);
-          auto binaryVector = BaseVector::create<FlatVector<StringView>>(
-              VARBINARY(), rowsPerVector, pool_.get());
-
-          for (int idx = 0; idx < rowsPerVector; ++idx) {
-            auto stringIndex = intData[idx] % sampleStrings.size();
-            const std::string& baseString = sampleStrings[stringIndex];
-
-            std::string binaryStr;
-            for (char c : baseString) {
-              binaryStr += static_cast<unsigned char>(c);
-            }
-            binaryVector->set(idx, StringView(binaryStr));
-          }
-          columnVector = binaryVector;
-        } else if constexpr (std::is_integral_v<T>) {
-          auto data = makeSequenceValues<typename TypeTraits<KIND>::NativeType>(
-              rowsPerVector, j + 1);
-          columnVector = vectorMaker_.flatVector<T>(data);
-        } else if constexpr (std::is_floating_point_v<T>) {
-          auto intData = makeSequenceValues<int64_t>(rowsPerVector, j + 1);
-          std::vector<T> floatData;
-          floatData.reserve(intData.size());
-          for (auto val : intData) {
-            floatData.push_back(static_cast<T>(val) + 0.5f);
-          }
-          columnVector = vectorMaker_.flatVector<T>(floatData);
-        } else {
-          VELOX_FAIL(
-              "Unsupported type for makeVectors: {}", TypeTraits<KIND>::name);
-        }
-
-        // Apply partial nulls by randomly setting some positions to null
-        if (partialNull && !allNulls) {
-          std::mt19937 gen(42); // Fixed seed for reproducibility
-          std::uniform_real_distribution<> dis(0.0, 1.0);
-          const double nullProbability = 0.2;
-
-          for (vector_size_t idx = 0; idx < rowsPerVector; ++idx) {
-            if (dis(gen) < nullProbability) {
-              columnVector->setNull(idx, true);
-            }
-          }
-        }
-
-        vectors.push_back(columnVector);
-      }
-
-      rowVectors.push_back(makeRowVector(names, vectors));
+  /// Generate test data vectors with configurable null patterns (deprecated version for backwards compatibility)
+  template <TypeKind KIND>
+  std::vector<RowVectorPtr> makeVectors(
+      int32_t count,
+      int32_t rowsPerVector,
+      int32_t numColumns,
+      bool allNulls,
+      bool partialNull) {
+    NullParam nullParam = NullParam::kNoNulls;
+    if (allNulls) {
+      nullParam = NullParam::kAllNulls;
+    } else if (partialNull) {
+      nullParam = NullParam::kPartialNulls;
     }
-
-    rowType_ = std::make_shared<RowType>(std::move(names), std::move(types));
-
-    return rowVectors;
   }
 
   /// Creates data files for Iceberg testing with simple row/column
@@ -292,6 +387,28 @@ class IcebergReadEqualityDeletes : public IcebergReadTestBase,
       std::vector<RowVectorPtr> dataVectors = {}) {
     if (dataVectors.empty()) {
       dataVectors = makeVectors<KIND>(splitCount, numRows, numColumns);
+    }
+    VELOX_CHECK_EQ(dataVectors.size(), splitCount);
+
+    std::vector<std::shared_ptr<TempFilePath>> dataFilePaths;
+    dataFilePaths.reserve(splitCount);
+    for (auto i = 0; i < splitCount; i++) {
+      dataFilePaths.emplace_back(TempFilePath::create());
+      writeToFile(dataFilePaths.back()->getPath(), dataVectors[i]);
+    }
+
+    createDuckDbTable(dataVectors);
+    return dataFilePaths;
+  }
+
+  /// Creates data files for Iceberg testing with mixed row types using TestParams
+  std::vector<std::shared_ptr<TempFilePath>> writeDataFilesWithMixedTypes(
+      uint64_t numRows,
+      int32_t splitCount,
+      const TestParams& testParams,
+      std::vector<RowVectorPtr> dataVectors = {}) {
+    if (dataVectors.empty()) {
+      dataVectors = makeVectorsWithMixedTypes(splitCount, numRows, testParams.dataRowType, testParams.nullParamForData);
     }
     VELOX_CHECK_EQ(dataVectors.size(), splitCount);
 
@@ -386,6 +503,157 @@ class IcebergReadEqualityDeletes : public IcebergReadTestBase,
       default:
         VELOX_FAIL("Unsupported type for equality deletes: {}", type->toString());
     }
+  }
+
+  // Helper function to run equality deletes tests with mixed row types using TestParams
+  void runEqualityDeletesTestWithMixedTypes(
+      const TestParams& testParams,
+      const std::vector<int64_t>& deleteValues,
+      const std::string& duckDbSql = "") {
+    
+    auto rowType = testParams.dataRowType;
+    auto nullParams = testParams.nullParamForData;
+    
+    // For now, we'll use the first column's type for delete operations
+    // This matches the current behavior where we delete based on the first column
+    auto firstColumnType = rowType->childAt(0);
+    
+    // Generate data using the mixed types
+    auto dataVectors = makeVectorsWithMixedTypes(1, rowCount_, rowType, nullParams);
+    
+    // Use the appropriate data file writer
+    auto dataFilePaths = writeDataFilesWithMixedTypes(rowCount_, 1, testParams, dataVectors);
+    
+    // Create equality delete file based on the first column type
+    callEqualityDeletesTestWithDataFiles(firstColumnType, deleteValues, dataFilePaths[0], rowType, duckDbSql);
+  }
+
+  // Helper to run equality delete test with existing data files
+  void callEqualityDeletesTestWithDataFiles(
+      const TypePtr& type,
+      const std::vector<int64_t>& deleteValues,
+      std::shared_ptr<TempFilePath> dataFilePath,
+      const RowTypePtr& outputRowType,
+      const std::string& duckDbSql = "") {
+    
+    std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
+    equalityFieldIdsMap.insert({0, {1}});
+    
+    std::vector<connector::hive::iceberg::IcebergDeleteFile> deleteFiles;
+    std::string predicates = "";
+    
+    if (!deleteValues.empty()) {
+      std::vector<std::shared_ptr<TempFilePath>> deleteFilePaths;
+      
+      switch (type->kind()) {
+        case TypeKind::TINYINT: {
+          std::vector<int8_t> typedValues;
+          for (auto val : deleteValues) {
+            typedValues.push_back(static_cast<int8_t>(val));
+          }
+          std::unordered_map<int8_t, std::vector<std::vector<int8_t>>> equalityDeleteVectorMap;
+          equalityDeleteVectorMap.insert({0, {typedValues}});
+          deleteFilePaths.push_back(writeEqualityDeleteFile<TypeKind::TINYINT>(equalityDeleteVectorMap.at(0)));
+          predicates = makePredicates<TypeKind::TINYINT>(equalityDeleteVectorMap.at(0), equalityFieldIdsMap.at(0));
+          break;
+        }
+        case TypeKind::SMALLINT: {
+          std::vector<int16_t> typedValues;
+          for (auto val : deleteValues) {
+            typedValues.push_back(static_cast<int16_t>(val));
+          }
+          std::unordered_map<int8_t, std::vector<std::vector<int16_t>>> equalityDeleteVectorMap;
+          equalityDeleteVectorMap.insert({0, {typedValues}});
+          deleteFilePaths.push_back(writeEqualityDeleteFile<TypeKind::SMALLINT>(equalityDeleteVectorMap.at(0)));
+          predicates = makePredicates<TypeKind::SMALLINT>(equalityDeleteVectorMap.at(0), equalityFieldIdsMap.at(0));
+          break;
+        }
+        case TypeKind::INTEGER: {
+          std::vector<int32_t> typedValues;
+          for (auto val : deleteValues) {
+            typedValues.push_back(static_cast<int32_t>(val));
+          }
+          std::unordered_map<int8_t, std::vector<std::vector<int32_t>>> equalityDeleteVectorMap;
+          equalityDeleteVectorMap.insert({0, {typedValues}});
+          deleteFilePaths.push_back(writeEqualityDeleteFile<TypeKind::INTEGER>(equalityDeleteVectorMap.at(0)));
+          predicates = makePredicates<TypeKind::INTEGER>(equalityDeleteVectorMap.at(0), equalityFieldIdsMap.at(0));
+          break;
+        }
+        case TypeKind::BIGINT: {
+          std::unordered_map<int8_t, std::vector<std::vector<int64_t>>> equalityDeleteVectorMap;
+          equalityDeleteVectorMap.insert({0, {deleteValues}});
+          deleteFilePaths.push_back(writeEqualityDeleteFile<TypeKind::BIGINT>(equalityDeleteVectorMap.at(0)));
+          predicates = makePredicates<TypeKind::BIGINT>(equalityDeleteVectorMap.at(0), equalityFieldIdsMap.at(0));
+          break;
+        }
+        case TypeKind::VARCHAR:
+        case TypeKind::VARBINARY: {
+          // For string types, convert int values to strings using the sample data
+          const std::vector<std::string> sampleStrings = {
+              "apple", "banana", "cherry", "date", "elderberry",
+              "fig", "grape", "honeydew", "kiwi", "lemon",
+              "mango", "nectarine", "orange", "papaya", "quince",
+              "raspberry", "strawberry", "tangerine", "watermelon", "zucchini"
+          };
+          
+          std::vector<std::string> strings;
+          std::vector<StringView> typedValues;
+          strings.reserve(deleteValues.size());
+          typedValues.reserve(deleteValues.size());
+          
+          for (auto val : deleteValues) {
+            auto stringIndex = val % sampleStrings.size();
+            if (type->kind() == TypeKind::VARCHAR) {
+              strings.push_back(sampleStrings[stringIndex]);
+            } else {  // VARBINARY
+              const std::string& baseString = sampleStrings[stringIndex];
+              std::string binaryStr;
+              for (char c : baseString) {
+                binaryStr += static_cast<unsigned char>(c);
+              }
+              strings.push_back(binaryStr);
+            }
+            typedValues.push_back(StringView(strings.back()));
+          }
+          
+          if (type->kind() == TypeKind::VARCHAR) {
+            std::unordered_map<int8_t, std::vector<std::vector<StringView>>> equalityDeleteVectorMap;
+            equalityDeleteVectorMap.insert({0, {typedValues}});
+            deleteFilePaths.push_back(writeEqualityDeleteFile<TypeKind::VARCHAR>(equalityDeleteVectorMap.at(0)));
+            predicates = makePredicates<TypeKind::VARCHAR>(equalityDeleteVectorMap.at(0), equalityFieldIdsMap.at(0));
+          } else {
+            std::unordered_map<int8_t, std::vector<std::vector<StringView>>> equalityDeleteVectorMap;
+            equalityDeleteVectorMap.insert({0, {typedValues}});
+            deleteFilePaths.push_back(writeEqualityDeleteFile<TypeKind::VARBINARY>(equalityDeleteVectorMap.at(0)));
+            predicates = makePredicates<TypeKind::VARBINARY>(equalityDeleteVectorMap.at(0), equalityFieldIdsMap.at(0));
+          }
+          break;
+        }
+        default:
+          VELOX_FAIL("Unsupported type for equality deletes: {}", type->toString());
+      }
+
+      IcebergDeleteFile deleteFile(
+          FileContent::kEqualityDeletes,
+          deleteFilePaths.back()->getPath(),
+          fileFormat_,
+          deleteValues.size(),
+          testing::internal::GetFileSize(std::fopen(deleteFilePaths.back()->getPath().c_str(), "r")),
+          equalityFieldIdsMap.at(0));
+      deleteFiles.push_back(deleteFile);
+    }
+
+    auto icebergSplits = makeIcebergSplits(dataFilePath->getPath(), deleteFiles);
+
+    std::string finalDuckDbSql = duckDbSql;
+    if (finalDuckDbSql.empty()) {
+      finalDuckDbSql = "SELECT * FROM tmp ";
+      if (!deleteValues.empty()) {
+        finalDuckDbSql += fmt::format("WHERE {}", predicates);
+      }
+    }
+
+    assertEqualityDeletes(icebergSplits.back(), outputRowType, finalDuckDbSql);
   }
 
  private:
@@ -1194,9 +1462,9 @@ TEST_P(IcebergReadEqualityDeletes, deleteFirstAndLastRows) {
     return;
   }
   
-  // Delete first and last rows using parameterized type
+  // Delete first and last rows using parameterized types and null parameters
   std::vector<int64_t> deleteValues = {0, rowCount_ - 1};
-  callEqualityDeletesTest(rowType->childAt(0), deleteValues);
+  runEqualityDeletesTestWithMixedTypes(params, deleteValues);
 }
 
 TEST_P(IcebergReadEqualityDeletes, deleteRandomRows) {
@@ -1213,13 +1481,13 @@ TEST_P(IcebergReadEqualityDeletes, deleteRandomRows) {
     return;
   }
   
-  // Delete random rows using parameterized type
+  // Delete random rows using parameterized types and null parameters
   auto randomIndices = makeRandomDeleteValues(rowCount_);
   std::vector<int64_t> deleteValues;
   for (auto idx : randomIndices) {
     deleteValues.push_back(static_cast<int64_t>(idx));
   }
-  callEqualityDeletesTest(rowType->childAt(0), deleteValues);
+  runEqualityDeletesTestWithMixedTypes(params, deleteValues);
 }
 
 TEST_P(IcebergReadEqualityDeletes, deleteAllRows) {
@@ -1236,9 +1504,9 @@ TEST_P(IcebergReadEqualityDeletes, deleteAllRows) {
     return;
   }
   
-  // Delete all rows using parameterized type
+  // Delete all rows using parameterized types and null parameters
   auto allRowsValues = makeSequenceValues<int64_t>(rowCount_);
-  callEqualityDeletesTest(rowType->childAt(0), allRowsValues, "SELECT * FROM tmp WHERE 1 = 0");
+  runEqualityDeletesTestWithMixedTypes(params, allRowsValues, "SELECT * FROM tmp WHERE 1 = 0");
 }
 
 TEST_P(IcebergReadEqualityDeletes, deleteNoRows) {
@@ -1255,9 +1523,8 @@ TEST_P(IcebergReadEqualityDeletes, deleteNoRows) {
     return;
   }
   
-  // Delete no rows using parameterized type (empty delete vector)
+  // Delete no rows using parameterized types and null parameters (empty delete vector)
   std::vector<int64_t> emptyDeleteValues;
-  callEqualityDeletesTest(rowType->childAt(0), emptyDeleteValues);
 }
 
 // Add the test methods that were previously in the parameterized class
