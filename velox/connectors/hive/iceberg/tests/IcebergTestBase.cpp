@@ -122,6 +122,123 @@ core::PlanNodePtr IcebergTestBase::tableScanNode(
   return PlanBuilder(pool_.get()).tableScan(outputRowType).planNode();
 }
 
+template <TypeKind KIND>
+std::vector<RowVectorPtr> IcebergTestBase::makeVectors(
+    int32_t count,
+    int32_t rowsPerVector,
+    int32_t numColumns,
+    bool allNulls,
+    bool partialNull) {
+  using T = typename TypeTraits<KIND>::NativeType;
+
+  // Sample strings for VARCHAR data generation
+  const std::vector<std::string> sampleStrings = {
+      "apple",     "banana",     "cherry",    "date",       "elderberry",
+      "fig",       "grape",      "honeydew",  "kiwi",       "lemon",
+      "mango",     "nectarine",  "orange",    "papaya",     "quince",
+      "raspberry", "strawberry", "tangerine", "watermelon", "zucchini"};
+
+  std::vector<TypePtr> types;
+  for (int j = 0; j < numColumns; j++) {
+    types.push_back(createScalarType<KIND>());
+  }
+  std::vector<std::string> names;
+  for (int j = 0; j < numColumns; j++) {
+    names.push_back(fmt::format("c{}", j));
+  }
+
+  std::vector<RowVectorPtr> rowVectors;
+  for (int i = 0; i < count; i++) {
+    std::vector<VectorPtr> vectors;
+
+    // Create the column values like below:
+    // c0 c1 c2
+    //  0  0  0
+    //  1  0  0
+    //  2  1  0
+    //  3  1  1
+    //  4  2  1
+    //  5  2  1
+    //  6  3  2
+    // ...
+    // In the first column c0, the values are continuously increasing and not
+    // repeating. In the second column c1, the values are continuously
+    // increasing and each value repeats once. And so on.
+    for (int j = 0; j < numColumns; j++) {
+      VectorPtr columnVector;
+
+      if (allNulls) {
+        // Use allNullFlatVector for all-null columns
+        columnVector = vectorMaker_.allNullFlatVector<T>(rowsPerVector);
+      } else if constexpr (KIND == TypeKind::VARCHAR) {
+        // For VARCHAR, use sample strings with sequence-based indexing
+        auto intData = makeSequenceValues<int64_t>(rowsPerVector, j + 1);
+        auto stringVector = BaseVector::create<FlatVector<StringView>>(
+            VARCHAR(), rowsPerVector, pool_.get());
+
+        for (int idx = 0; idx < rowsPerVector; ++idx) {
+          auto stringIndex = intData[idx] % sampleStrings.size();
+          const std::string& selectedString = sampleStrings[stringIndex];
+          stringVector->set(idx, StringView(selectedString));
+        }
+        columnVector = stringVector;
+      } else if constexpr (KIND == TypeKind::VARBINARY) {
+        auto intData = makeSequenceValues<int64_t>(rowsPerVector, j + 1);
+        auto binaryVector = BaseVector::create<FlatVector<StringView>>(
+            VARBINARY(), rowsPerVector, pool_.get());
+
+        for (int idx = 0; idx < rowsPerVector; ++idx) {
+          auto stringIndex = intData[idx] % sampleStrings.size();
+          const std::string& baseString = sampleStrings[stringIndex];
+
+          std::string binaryStr;
+          for (char c : baseString) {
+            binaryStr += static_cast<unsigned char>(c);
+          }
+          binaryVector->set(idx, StringView(binaryStr));
+        }
+        columnVector = binaryVector;
+      } else if constexpr (std::is_integral_v<T>) {
+        auto data = makeSequenceValues<typename TypeTraits<KIND>::NativeType>(
+            rowsPerVector, j + 1);
+        columnVector = vectorMaker_.flatVector<T>(data);
+      } else if constexpr (std::is_floating_point_v<T>) {
+        auto intData = makeSequenceValues<int64_t>(rowsPerVector, j + 1);
+        std::vector<T> floatData;
+        floatData.reserve(intData.size());
+        for (auto val : intData) {
+          floatData.push_back(static_cast<T>(val) + 0.5f);
+        }
+        columnVector = vectorMaker_.flatVector<T>(floatData);
+      } else {
+        VELOX_FAIL(
+            "Unsupported type for makeVectors: {}", TypeTraits<KIND>::name);
+      }
+
+      // Apply partial nulls by randomly setting some positions to null
+      if (partialNull && !allNulls) {
+        std::mt19937 gen(42); // Fixed seed for reproducibility
+        std::uniform_real_distribution<> dis(0.0, 1.0);
+        const double nullProbability = 0.2;
+
+        for (vector_size_t idx = 0; idx < rowsPerVector; ++idx) {
+          if (dis(gen) < nullProbability) {
+            columnVector->setNull(idx, true);
+          }
+        }
+      }
+
+      vectors.push_back(columnVector);
+    }
+
+    rowVectors.push_back(makeRowVector(names, vectors));
+  }
+
+  rowType_ = std::make_shared<RowType>(std::move(names), std::move(types));
+
+  return rowVectors;
+}
+
 // Explicit template instantiations for makeSequenceValues
 template std::vector<bool> IcebergTestBase::makeSequenceValues<bool>(
     int32_t,
@@ -165,5 +282,33 @@ template std::string IcebergTestBase::makeNotInList<TypeKind::TIMESTAMP>(
     const std::vector<Timestamp>&);
 template std::string IcebergTestBase::makeNotInList<TypeKind::HUGEINT>(
     const std::vector<int128_t>&);
+
+// Explicit template instantiations for makeVectors
+template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
+    TypeKind::BOOLEAN>(int32_t, int32_t, int32_t, bool, bool);
+template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
+    TypeKind::TINYINT>(int32_t, int32_t, int32_t, bool, bool);
+template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
+    TypeKind::SMALLINT>(int32_t, int32_t, int32_t, bool, bool);
+template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
+    TypeKind::INTEGER>(int32_t, int32_t, int32_t, bool, bool);
+template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
+    TypeKind::BIGINT>(int32_t, int32_t, int32_t, bool, bool);
+template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<TypeKind::REAL>(
+    int32_t,
+    int32_t,
+    int32_t,
+    bool,
+    bool);
+template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
+    TypeKind::DOUBLE>(int32_t, int32_t, int32_t, bool, bool);
+template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
+    TypeKind::VARCHAR>(int32_t, int32_t, int32_t, bool, bool);
+template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
+    TypeKind::VARBINARY>(int32_t, int32_t, int32_t, bool, bool);
+template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
+    TypeKind::TIMESTAMP>(int32_t, int32_t, int32_t, bool, bool);
+template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
+    TypeKind::HUGEINT>(int32_t, int32_t, int32_t, bool, bool);
 
 } // namespace facebook::velox::connector::hive::iceberg
