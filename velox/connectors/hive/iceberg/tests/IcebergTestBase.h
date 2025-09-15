@@ -56,5 +56,14 @@ class IcebergTestBase : public HiveConnectorTestBase {
       const std::unordered_map<std::string, std::optional<std::string>>&
           partitionKeys = {},
       const uint32_t splitCount = 1);
+
+  /// Generate test data vectors with configurable null patterns
+  template <TypeKind KIND>
+  std::vector<RowVectorPtr> makeVectors(
+      int32_t count,
+      int32_t rowsPerVector,
+      int32_t numColumns = 1,
+      bool allNulls = false,
+      bool partialNull = false);
 };
 } // namespace facebook::velox::connector::hive::iceberg
