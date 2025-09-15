@@ -1180,10 +1180,21 @@ TEST_P(IcebergReadEqualityDeletes, equalityDeletesLongDecimal) {
 
 // Add new test methods based on the original parameterized tests
 TEST_P(IcebergReadEqualityDeletes, floatAndDoubleThrowsError) {
+  auto params = GetParam();
+  auto rowType = params.dataRowType;
+  auto nullParams = params.nullParamForData;
+  
   folly::SingletonVault::singleton()->registrationComplete();
 
-  // Test for float (REAL)
-  {
+  // Only run this test for REAL and DOUBLE types
+  if (!rowType->childAt(0)->isReal() && !rowType->childAt(0)->isDouble()) {
+    GTEST_SKIP() << "Skipping floatAndDoubleThrowsError for non-floating point type: " 
+                 << rowType->childAt(0)->toString();
+    return;
+  }
+  
+  if (rowType->childAt(0)->isReal()) {
+    // Test for float (REAL)
     std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
     std::unordered_map<int8_t, std::vector<std::vector<float>>>
         equalityDeleteVectorMap;
@@ -1194,9 +1205,9 @@ TEST_P(IcebergReadEqualityDeletes, floatAndDoubleThrowsError) {
             equalityDeleteVectorMap, equalityFieldIdsMap),
         "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c1 : REAL");
   }
-
-  // Test for double (DOUBLE)
-  {
+  
+  if (rowType->childAt(0)->isDouble()) {
+    // Test for double (DOUBLE)
     std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
     std::unordered_map<int8_t, std::vector<std::vector<double>>>
         equalityDeleteVectorMap;
@@ -1216,6 +1227,13 @@ TEST_P(IcebergReadEqualityDeletes, deleteFirstAndLastRows) {
   
   folly::SingletonVault::singleton()->registrationComplete();
   
+  // Skip test for floating point types as they should throw errors
+  if (rowType->childAt(0)->isReal() || rowType->childAt(0)->isDouble()) {
+    GTEST_SKIP() << "Skipping deleteFirstAndLastRows for floating point type: " 
+                 << rowType->childAt(0)->toString();
+    return;
+  }
+  
   // Use BIGINT type for simplicity in this basic test
   std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
   std::unordered_map<int8_t, std::vector<std::vector<int64_t>>>
@@ -1233,6 +1251,13 @@ TEST_P(IcebergReadEqualityDeletes, deleteRandomRows) {
   auto nullParams = params.nullParamForData;
   
   folly::SingletonVault::singleton()->registrationComplete();
+  
+  // Skip test for floating point types as they should throw errors
+  if (rowType->childAt(0)->isReal() || rowType->childAt(0)->isDouble()) {
+    GTEST_SKIP() << "Skipping deleteRandomRows for floating point type: " 
+                 << rowType->childAt(0)->toString();
+    return;
+  }
   
   // Use BIGINT type for simplicity in this basic test
   std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
@@ -1257,6 +1282,13 @@ TEST_P(IcebergReadEqualityDeletes, deleteAllRows) {
   
   folly::SingletonVault::singleton()->registrationComplete();
   
+  // Skip test for floating point types as they should throw errors
+  if (rowType->childAt(0)->isReal() || rowType->childAt(0)->isDouble()) {
+    GTEST_SKIP() << "Skipping deleteAllRows for floating point type: " 
+                 << rowType->childAt(0)->toString();
+    return;
+  }
+  
   // Use BIGINT type for simplicity in this basic test
   std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
   std::unordered_map<int8_t, std::vector<std::vector<int64_t>>>
@@ -1276,6 +1308,13 @@ TEST_P(IcebergReadEqualityDeletes, deleteNoRows) {
   
   folly::SingletonVault::singleton()->registrationComplete();
   
+  // Skip test for floating point types as they should throw errors
+  if (rowType->childAt(0)->isReal() || rowType->childAt(0)->isDouble()) {
+    GTEST_SKIP() << "Skipping deleteNoRows for floating point type: " 
+                 << rowType->childAt(0)->toString();
+    return;
+  }
+  
   // Use BIGINT type for simplicity in this basic test
   std::unordered_map<int8_t, std::vector<int32_t>> equalityFieldIdsMap;
   std::unordered_map<int8_t, std::vector<std::vector<int64_t>>>
@@ -1294,11 +1333,36 @@ INSTANTIATE_TEST_SUITE_P(
     ReadEqualityDeletes,
     IcebergReadEqualityDeletes,
     ::testing::Values(
-        TestParams{ROW({"a"}, {BIGINT()}), {NullParam::kNoNulls}}, // 1 single BIGINT column without nulls
-        TestParams{ROW({"a", "b"}, {BIGINT(), BIGINT()}), {NullParam::kNoNulls, NullParam::kPartialNulls}}, // 2 BIGINT columns, one without nulls, one with partial nulls
-        TestParams{ROW({"a", "b"}, {TINYINT(), VARCHAR()}), {NullParam::kNoNulls, NullParam::kNoNulls}}, // 1 TINYINT column without nulls, one VARCHAR column without nulls
-        TestParams{ROW({"a", "b"}, {BIGINT(), BIGINT()}), {NullParam::kAllNulls, NullParam::kNoNulls}}, // one column all nulls, one without nulls
-        TestParams{ROW({"a", "b", "c"}, {BIGINT(), VARCHAR(), TINYINT()}), {NullParam::kNoNulls, NullParam::kPartialNulls, NullParam::kAllNulls}} // 3 columns with different null patterns
+        // Single column tests with different integer types
+        TestParams{ROW({"a"}, {TINYINT()}), {NullParam::kNoNulls}},
+        TestParams{ROW({"a"}, {SMALLINT()}), {NullParam::kNoNulls}},
+        TestParams{ROW({"a"}, {INTEGER()}), {NullParam::kNoNulls}},
+        TestParams{ROW({"a"}, {BIGINT()}), {NullParam::kNoNulls}},
+        TestParams{ROW({"a"}, {VARCHAR()}), {NullParam::kNoNulls}},
+        TestParams{ROW({"a"}, {VARBINARY()}), {NullParam::kNoNulls}},
+        
+        // Single column tests with floating point types (for error testing)
+        TestParams{ROW({"a"}, {REAL()}), {NullParam::kNoNulls}},
+        TestParams{ROW({"a"}, {DOUBLE()}), {NullParam::kNoNulls}},
+        
+        // Multi-column tests with integer types and nulls
+        TestParams{ROW({"a", "b"}, {TINYINT(), SMALLINT()}), {NullParam::kNoNulls, NullParam::kNoNulls}},
+        TestParams{ROW({"a", "b"}, {INTEGER(), BIGINT()}), {NullParam::kNoNulls, NullParam::kPartialNulls}},
+        TestParams{ROW({"a", "b"}, {TINYINT(), VARCHAR()}), {NullParam::kNoNulls, NullParam::kNoNulls}},
+        TestParams{ROW({"a", "b"}, {SMALLINT(), VARBINARY()}), {NullParam::kPartialNulls, NullParam::kNoNulls}},
+        TestParams{ROW({"a", "b"}, {BIGINT(), BIGINT()}), {NullParam::kAllNulls, NullParam::kNoNulls}},
+        
+        // Mix integer types with string types
+        TestParams{ROW({"a", "b"}, {BIGINT(), VARCHAR()}), {NullParam::kNoNulls, NullParam::kPartialNulls}},
+        TestParams{ROW({"a", "b"}, {INTEGER(), VARBINARY()}), {NullParam::kPartialNulls, NullParam::kNoNulls}},
+        
+        // Three column combinations
+        TestParams{ROW({"a", "b", "c"}, {TINYINT(), SMALLINT(), INTEGER()}), {NullParam::kNoNulls, NullParam::kNoNulls, NullParam::kNoNulls}},
+        TestParams{ROW({"a", "b", "c"}, {BIGINT(), VARCHAR(), VARBINARY()}), {NullParam::kNoNulls, NullParam::kPartialNulls, NullParam::kAllNulls}},
+        TestParams{ROW({"a", "b", "c"}, {TINYINT(), VARCHAR(), BIGINT()}), {NullParam::kPartialNulls, NullParam::kNoNulls, NullParam::kPartialNulls}},
+        
+        // Edge case: all nulls
+        TestParams{ROW({"a", "b"}, {INTEGER(), VARCHAR()}), {NullParam::kAllNulls, NullParam::kAllNulls}}
     ),
     [](const testing::TestParamInfo<TestParams>& info) {
       std::string name;
