@@ -20,6 +20,8 @@
 
 namespace facebook::velox::connector::hive::iceberg {
 
+enum class NullParam { kNoNulls, kPartialNulls, kAllNulls };
+
 class IcebergReadEqualityDeleteTest : public IcebergTestBase {
  protected:
   void assertQuery(
@@ -36,7 +38,7 @@ class IcebergReadEqualityDeleteTest : public IcebergTestBase {
     ASSERT_TRUE(it->second.peakMemoryBytes > 0);
   }
 
-  /// @brief Asserts equality delete functionality for a given type.
+  /// Asserts equality delete functionality for a given type.
   /// @tparam KIND The type kind (e.g., INTEGER, VARCHAR).
   /// @param equalityDeleteVectorMap A map of equality delete vectors.
   /// @param equalityFieldIdsMap A map of equality field IDs.
