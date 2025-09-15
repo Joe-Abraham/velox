@@ -36,6 +36,12 @@ class IcebergReadEqualityDeleteTest : public IcebergTestBase {
     ASSERT_TRUE(it->second.peakMemoryBytes > 0);
   }
 
+  /// @brief Asserts equality delete functionality for a given type.
+  /// @tparam KIND The type kind (e.g., INTEGER, VARCHAR).
+  /// @param equalityDeleteVectorMap A map of equality delete vectors.
+  /// @param equalityFieldIdsMap A map of equality field IDs.
+  /// @param duckDbSql The SQL query to validate against DuckDB (optional).
+  /// @param dataVectors Pre-created data vectors (optional).
   template <TypeKind KIND>
   void assertEqualityDeletes(
       const std::unordered_map<
