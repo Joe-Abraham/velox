@@ -21,9 +21,9 @@
 using namespace facebook::velox::exec::test;
 
 namespace facebook::velox::connector::hive::iceberg {
-class IcebergReadTestBase : public HiveConnectorTestBase {
+class IcebergTestBase : public HiveConnectorTestBase {
  public:
-  IcebergReadTestBase()
+  IcebergTestBase()
       : config_{std::make_shared<facebook::velox::dwrf::Config>()} {
     // Make the writers flush per batch so that we can create non-aligned
     // RowGroups between the base data files and delete files
