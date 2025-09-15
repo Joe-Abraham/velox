@@ -17,7 +17,7 @@
 #include <folly/Singleton.h>
 #include "velox/connectors/hive/iceberg/IcebergMetadataColumns.h"
 #include "velox/connectors/hive/iceberg/IcebergSplit.h"
-#include "velox/connectors/hive/iceberg/tests/IcebergReadTestBase.h"
+#include "velox/connectors/hive/iceberg/tests/IcebergTestBase.h"
 #include "velox/dwio/common/tests/utils/DataFiles.h"
 #include "velox/exec/PlanNodeStats.h"
 #include "velox/exec/tests/utils/PlanBuilder.h"
@@ -27,10 +27,10 @@
 
 namespace facebook::velox::connector::hive::iceberg {
 
-class IcebergReadPositionalDeleteTest : public IcebergReadTestBase {
+class IcebergReadPositionalDeleteTest : public IcebergTestBase {
  public:
   void SetUp() override {
-    IcebergReadTestBase::SetUp();
+    IcebergTestBase::SetUp();
 #ifdef VELOX_ENABLE_PARQUET
     parquet::registerParquetReaderFactory();
 #endif

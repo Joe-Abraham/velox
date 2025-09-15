@@ -15,14 +15,14 @@
  */
 
 #include "velox/common/base/tests/GTestUtils.h"
-#include "velox/connectors/hive/iceberg/tests/IcebergReadTestBase.h"
+#include "velox/connectors/hive/iceberg/tests/IcebergTestBase.h"
 #include "velox/exec/PlanNodeStats.h"
 
 namespace facebook::velox::connector::hive::iceberg {
 
-class IcebergReadEqualityDeleteTest : public IcebergReadTestBase {
+class IcebergReadEqualityDeleteTest : public IcebergTestBase {
  protected:
-  void assertEqualityDeletes(
+  void assertQuery(
       std::shared_ptr<connector::ConnectorSplit> split,
       RowTypePtr outputRowType,
       const std::string& duckDbSql) {
@@ -445,13 +445,12 @@ TEST_F(IcebergReadEqualityDeleteTest, testSubFieldEqualityDelete) {
 
   // Select both c_bigint and c_row column columns
   std::string duckDbSql = "SELECT * FROM tmp WHERE c_row.c0 not in (1, 2)";
-  assertEqualityDeletes(
+  assertQuery(
       icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
 
   // SELECT only c_bigint column
   duckDbSql = "SELECT c_bigint FROM tmp WHERE c_row.c0 not in (1, 2)";
-  assertEqualityDeletes(
-      icebergSplits.back(), ROW({"c_bigint"}, {BIGINT()}), duckDbSql);
+  assertQuery(icebergSplits.back(), ROW({"c_bigint"}, {BIGINT()}), duckDbSql);
 }
 
 TEST_F(IcebergReadEqualityDeleteTest, equalityDeletesMixedTypesInt64Varchar) {
@@ -523,7 +522,7 @@ TEST_F(IcebergReadEqualityDeleteTest, equalityDeletesMixedTypesInt64Varchar) {
     createDuckDbTable(dataVectors);
     std::string duckDbSql =
         "SELECT * FROM tmp WHERE c0 NOT IN (0, 9) AND c1 NOT IN ('apple', 'lemon')";
-    assertEqualityDeletes(
+    assertQuery(
         icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
   }
 
@@ -572,7 +571,7 @@ TEST_F(IcebergReadEqualityDeleteTest, equalityDeletesMixedTypesInt64Varchar) {
     createDuckDbTable(dataVectors);
     std::string duckDbSql =
         "SELECT * FROM tmp WHERE c0 NOT IN (1, 3, 5, 7) AND c1 NOT IN ('banana', 'date', 'fig', 'honeydew')";
-    assertEqualityDeletes(
+    assertQuery(
         icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
   }
 
@@ -631,7 +630,7 @@ TEST_F(IcebergReadEqualityDeleteTest, equalityDeletesMixedTypesInt64Varchar) {
 
     createDuckDbTable(dataVectors);
     std::string duckDbSql = "SELECT * FROM tmp WHERE 1 = 0";
-    assertEqualityDeletes(
+    assertQuery(
         icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
   }
 
@@ -679,7 +678,7 @@ TEST_F(IcebergReadEqualityDeleteTest, equalityDeletesMixedTypesInt64Varchar) {
 
     createDuckDbTable(dataVectors);
     std::string duckDbSql = "SELECT * FROM tmp";
-    assertEqualityDeletes(
+    assertQuery(
         icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
   }
 }
@@ -753,7 +752,7 @@ TEST_F(
     createDuckDbTable(dataVectors);
     std::string duckDbSql =
         "SELECT * FROM tmp WHERE c0 NOT IN (0, 9) AND hex(c1) NOT IN ('0102', '1314')";
-    assertEqualityDeletes(
+    assertQuery(
         icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
   }
 
@@ -803,7 +802,7 @@ TEST_F(
     createDuckDbTable(dataVectors);
     std::string duckDbSql =
         "SELECT * FROM tmp WHERE c0 NOT IN (1, 3, 5, 7) AND hex(c1) NOT IN ('0304', '0708', '0B0C', '0F10')";
-    assertEqualityDeletes(
+    assertQuery(
         icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
   }
 
@@ -862,7 +861,7 @@ TEST_F(
 
     createDuckDbTable(dataVectors);
     std::string duckDbSql = "SELECT * FROM tmp WHERE 1 = 0";
-    assertEqualityDeletes(
+    assertQuery(
         icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
   }
 
@@ -910,7 +909,7 @@ TEST_F(
 
     createDuckDbTable(dataVectors);
     std::string duckDbSql = "SELECT * FROM tmp";
-    assertEqualityDeletes(
+    assertQuery(
         icebergSplits.back(), asRowType(dataVectors[0]->type()), duckDbSql);
   }
 }

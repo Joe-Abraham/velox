@@ -14,14 +14,14 @@
  * limitations under the License.
  */
 
-#include "velox/connectors/hive/iceberg/tests/IcebergReadTestBase.h"
+#include "velox/connectors/hive/iceberg/tests/IcebergTestBase.h"
 
 #include "connectors/hive/iceberg/IcebergSplit.h"
 #include "exec/tests/utils/PlanBuilder.h"
 
 namespace facebook::velox::connector::hive::iceberg {
 
-std::vector<int64_t> IcebergReadTestBase::makeRandomDeleteValues(
+std::vector<int64_t> IcebergTestBase::makeRandomDeleteValues(
     int32_t maxRowNumber) {
   std::mt19937 gen{0};
   std::vector<int64_t> deleteRows;
@@ -34,7 +34,7 @@ std::vector<int64_t> IcebergReadTestBase::makeRandomDeleteValues(
 }
 
 template <typename T>
-std::vector<T> IcebergReadTestBase::makeSequenceValues(
+std::vector<T> IcebergTestBase::makeSequenceValues(
     int32_t numRows,
     int8_t repeat) {
   static_assert(std::is_integral_v<T>, "T must be an integral type");
@@ -53,7 +53,7 @@ std::vector<T> IcebergReadTestBase::makeSequenceValues(
 }
 
 template <TypeKind KIND>
-std::string IcebergReadTestBase::makeNotInList(
+std::string IcebergTestBase::makeNotInList(
     const std::vector<typename TypeTraits<KIND>::NativeType>& deleteValues) {
   using T = typename TypeTraits<KIND>::NativeType;
   if (deleteValues.empty()) {
@@ -84,8 +84,7 @@ std::string IcebergReadTestBase::makeNotInList(
   }
 }
 
-std::vector<std::shared_ptr<ConnectorSplit>>
-IcebergReadTestBase::makeIcebergSplits(
+std::vector<std::shared_ptr<ConnectorSplit>> IcebergTestBase::makeIcebergSplits(
     const std::string& dataFilePath,
     const std::vector<IcebergDeleteFile>& deleteFiles,
     const std::unordered_map<std::string, std::optional<std::string>>&
@@ -118,52 +117,53 @@ IcebergReadTestBase::makeIcebergSplits(
   return splits;
 }
 
-core::PlanNodePtr IcebergReadTestBase::tableScanNode(
+core::PlanNodePtr IcebergTestBase::tableScanNode(
     const RowTypePtr& outputRowType) const {
   return PlanBuilder(pool_.get()).tableScan(outputRowType).planNode();
 }
 
 // Explicit template instantiations for makeSequenceValues
-template std::vector<bool> IcebergReadTestBase::makeSequenceValues<bool>(
+template std::vector<bool> IcebergTestBase::makeSequenceValues<bool>(
     int32_t,
     int8_t);
-template std::vector<int8_t> IcebergReadTestBase::makeSequenceValues<int8_t>(
+template std::vector<int8_t> IcebergTestBase::makeSequenceValues<int8_t>(
     int32_t,
     int8_t);
-template std::vector<int16_t> IcebergReadTestBase::makeSequenceValues<int16_t>(
+template std::vector<int16_t> IcebergTestBase::makeSequenceValues<int16_t>(
     int32_t,
     int8_t);
-template std::vector<int32_t> IcebergReadTestBase::makeSequenceValues<int32_t>(
+template std::vector<int32_t> IcebergTestBase::makeSequenceValues<int32_t>(
     int32_t,
     int8_t);
-template std::vector<int64_t> IcebergReadTestBase::makeSequenceValues<int64_t>(
+template std::vector<int64_t> IcebergTestBase::makeSequenceValues<int64_t>(
     int32_t,
     int8_t);
-template std::vector<int128_t>
-    IcebergReadTestBase::makeSequenceValues<int128_t>(int32_t, int8_t);
+template std::vector<int128_t> IcebergTestBase::makeSequenceValues<int128_t>(
+    int32_t,
+    int8_t);
 
 // Explicit template instantiations for makeNotInList
-template std::string IcebergReadTestBase::makeNotInList<TypeKind::BOOLEAN>(
+template std::string IcebergTestBase::makeNotInList<TypeKind::BOOLEAN>(
     const std::vector<bool>&);
-template std::string IcebergReadTestBase::makeNotInList<TypeKind::TINYINT>(
+template std::string IcebergTestBase::makeNotInList<TypeKind::TINYINT>(
     const std::vector<int8_t>&);
-template std::string IcebergReadTestBase::makeNotInList<TypeKind::SMALLINT>(
+template std::string IcebergTestBase::makeNotInList<TypeKind::SMALLINT>(
     const std::vector<int16_t>&);
-template std::string IcebergReadTestBase::makeNotInList<TypeKind::INTEGER>(
+template std::string IcebergTestBase::makeNotInList<TypeKind::INTEGER>(
     const std::vector<int32_t>&);
-template std::string IcebergReadTestBase::makeNotInList<TypeKind::BIGINT>(
+template std::string IcebergTestBase::makeNotInList<TypeKind::BIGINT>(
     const std::vector<int64_t>&);
-template std::string IcebergReadTestBase::makeNotInList<TypeKind::REAL>(
+template std::string IcebergTestBase::makeNotInList<TypeKind::REAL>(
     const std::vector<float>&);
-template std::string IcebergReadTestBase::makeNotInList<TypeKind::DOUBLE>(
+template std::string IcebergTestBase::makeNotInList<TypeKind::DOUBLE>(
     const std::vector<double>&);
-template std::string IcebergReadTestBase::makeNotInList<TypeKind::VARCHAR>(
+template std::string IcebergTestBase::makeNotInList<TypeKind::VARCHAR>(
     const std::vector<StringView>&);
-template std::string IcebergReadTestBase::makeNotInList<TypeKind::VARBINARY>(
+template std::string IcebergTestBase::makeNotInList<TypeKind::VARBINARY>(
     const std::vector<StringView>&);
-template std::string IcebergReadTestBase::makeNotInList<TypeKind::TIMESTAMP>(
+template std::string IcebergTestBase::makeNotInList<TypeKind::TIMESTAMP>(
     const std::vector<Timestamp>&);
-template std::string IcebergReadTestBase::makeNotInList<TypeKind::HUGEINT>(
+template std::string IcebergTestBase::makeNotInList<TypeKind::HUGEINT>(
     const std::vector<int128_t>&);
 
 } // namespace facebook::velox::connector::hive::iceberg
