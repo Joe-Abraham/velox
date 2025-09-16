@@ -427,6 +427,10 @@ class IcebergReadPositionalDeleteTest : public IcebergTestBase {
         numRowsInPreviousBaseFiles += baseFileSize.second;
       }
 
+      if (allDeleteValues.empty()) {
+        return "SELECT * FROM tmp";
+      }
+      
       return fmt::format(
           "SELECT * FROM tmp WHERE c0 NOT IN ({})",
           makeNotInList<TypeKind::BIGINT>(allDeleteValues));
