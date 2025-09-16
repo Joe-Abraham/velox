@@ -427,13 +427,17 @@ class IcebergReadPositionalDeleteTest : public IcebergTestBase {
         numRowsInPreviousBaseFiles += baseFileSize.second;
       }
 
-      if (allDeleteValues.empty()) {
-        return "SELECT * FROM tmp";
+      std::string deleteValuesList;
+      if (!allDeleteValues.empty()) {
+        deleteValuesList = std::to_string(allDeleteValues[0]);
+        for (size_t i = 1; i < allDeleteValues.size(); ++i) {
+          deleteValuesList += ", " + std::to_string(allDeleteValues[i]);
+        }
       }
       
       return fmt::format(
           "SELECT * FROM tmp WHERE c0 NOT IN ({})",
-          makeNotInList<TypeKind::BIGINT>(allDeleteValues));
+          deleteValuesList);
     }
   }
 
