@@ -54,7 +54,6 @@ std::string testParamsToString(const TestParams& params) {
 class IcebergReadEqualityDeleteTest
     : public IcebergTestBase,
       public testing::WithParamInterface<TestParams> {
- private:
   std::shared_ptr<TempFilePath> writeEqualityDeleteFile(
       const std::vector<RowVectorPtr>& deleteVectors) {
     VELOX_CHECK_GT(deleteVectors.size(), 0);
@@ -79,12 +78,95 @@ class IcebergReadEqualityDeleteTest
       case TypeKind::SMALLINT:
       case TypeKind::INTEGER:
       case TypeKind::BIGINT:
+      case TypeKind::REAL:
+      case TypeKind::DOUBLE:
         return fmt::format(
             "({} IS NULL OR {} <> {})", columnName, columnName, valueStr);
       default:
         VELOX_FAIL(
             "Unsupported predicate type: {}", mapTypeKindToName(columnType));
     }
+  }
+
+  /// Generates equality-delete value column for the provided indices.
+  ///
+  /// Extracts values from \p dataColumn at the specified \p indices for the
+  /// given \p kind, and appends a single matching FlatVector to
+  /// \p deleteVectorColumns. The randomness, if any, is determined by how
+  /// \p indices is produced by the caller.
+  ///
+  /// Supported kinds: TINYINT, SMALLINT, INTEGER, BIGINT, VARCHAR, VARBINARY.
+  /// Throws for unsupported kinds.
+  ///
+  /// \param kind The TypeKind of the source column.
+  /// \param dataColumn The source vector to read values from; must match \p
+  /// kind.
+  /// \param indices Row indices whose values are used to form the delete
+  /// column.
+  /// \param deleteVectorColumns Output vector where the constructed delete
+  /// column is appended.
+  void generateRandomDeleteValues(
+      TypeKind kind,
+      const VectorPtr& dataColumn,
+      const std::vector<int64_t>& indices,
+      std::vector<VectorPtr>& deleteVectorColumns) {
+    switch (kind) {
+      case TypeKind::TINYINT:
+        generateDeleteColumns<TypeKind::TINYINT>(
+            dataColumn, indices, deleteVectorColumns);
+        break;
+      case TypeKind::SMALLINT:
+        generateDeleteColumns<TypeKind::SMALLINT>(
+            dataColumn, indices, deleteVectorColumns);
+        break;
+      case TypeKind::INTEGER:
+        generateDeleteColumns<TypeKind::INTEGER>(
+            dataColumn, indices, deleteVectorColumns);
+        break;
+      case TypeKind::BIGINT:
+        generateDeleteColumns<TypeKind::BIGINT>(
+            dataColumn, indices, deleteVectorColumns);
+        break;
+      case TypeKind::VARCHAR:
+        generateDeleteColumns<TypeKind::VARCHAR>(
+            dataColumn, indices, deleteVectorColumns);
+        break;
+      case TypeKind::VARBINARY:
+        generateDeleteColumns<TypeKind::VARBINARY>(
+            dataColumn, indices, deleteVectorColumns);
+        break;
+      default:
+        VELOX_FAIL("Unsupported type: {}", mapTypeKindToName(kind));
+    }
+  }
+
+  /// \brief Generates delete columns for a given type KIND.
+  ///
+  /// This templated helper function extracts values from the provided
+  /// data column at the specified indices and appends them as a new
+  /// FlatVector to the deleteVectorColumns vector.
+  ///
+  /// @tparam KIND The TypeKind of the column.
+  /// @param dataColumn The source vector containing data.
+  /// @param indices The indices of rows to be deleted.
+  /// @param deleteVectorColumns The vector to which the delete column is
+  /// appended.
+  template <TypeKind KIND>
+  void generateDeleteColumns(
+      const VectorPtr& dataColumn,
+      const std::vector<int64_t>& indices,
+      std::vector<VectorPtr>& deleteVectorColumns) {
+    using T = TypeTraits<KIND>::NativeType;
+    auto flatVector = dataColumn->as<FlatVector<T>>();
+
+    std::vector<T> deleteValues;
+    deleteValues.reserve(indices.size());
+
+    for (auto idx : indices) {
+      deleteValues.push_back(flatVector->valueAt(idx));
+    }
+
+    deleteVectorColumns.push_back(makeFlatVector<T>(deleteValues));
   }
 
   std::string makeTypePredicates(
@@ -94,82 +176,229 @@ class IcebergReadEqualityDeleteTest
     VELOX_CHECK_EQ(deleteVectors.size(), 1);
     VELOX_CHECK_EQ(equalityFieldIds.size(), columnTypes.size());
 
-    if (deleteVectors.empty()) {
+    if (deleteVectors.empty() || deleteVectors[0]->size() == 0) {
       return "";
     }
 
-    // Get the number of delete rows from the first vector
-    int32_t numDeletedRows = deleteVectors[0]->size();
     auto deleteRowVector = deleteVectors[0];
+    int32_t numDeletedRows = deleteRowVector->size();
 
-    std::string predicates;
+    if (equalityFieldIds.size() == 1) {
+      // Single column delete - use NOT IN approach like original code
+      auto deleteVector = deleteRowVector->childAt(0);
+      auto fieldId = equalityFieldIds[0];
+      auto columnType = columnTypes[0];
+      std::string columnName = fmt::format("c{}", fieldId - 1);
 
-    // Build predicates for each row to be deleted
-    for (int32_t row = 0; row < numDeletedRows; ++row) {
-      if (row > 0) {
-        predicates += " AND ";
-      }
-
-      std::string rowPredicate = "(";
-
-      // For each column in this delete row
-      for (size_t i = 0; i < equalityFieldIds.size(); ++i) {
-        if (i > 0) {
-          rowPredicate += " AND ";
-        }
-
-        auto deleteVector = deleteRowVector->childAt(i);
-        auto fieldId = equalityFieldIds[i];
-        auto columnType = columnTypes[i];
-        std::string columnName = fmt::format("c{}", fieldId - 1);
-
-        // Check if the delete value is null
-        if (deleteVector->isNullAt(row)) {
-          // For null delete values, we exclude rows with null values
-          rowPredicate += fmt::format("{} IS NOT NULL", columnName);
-        } else {
-          std::string valueStr;
-          switch (columnType) {
-            case TypeKind::TINYINT: {
-              auto vector = deleteVector->as<FlatVector<int8_t>>();
-              valueStr = std::to_string(vector->valueAt(row));
-              break;
+      // Extract delete values based on type
+      switch (columnType) {
+        case TypeKind::TINYINT: {
+          auto vector = deleteVector->as<FlatVector<int8_t>>();
+          std::vector<int8_t> deleteValues;
+          for (int row = 0; row < numDeletedRows; ++row) {
+            if (!vector->isNullAt(row)) {
+              deleteValues.push_back(vector->valueAt(row));
             }
-            case TypeKind::SMALLINT: {
-              auto vector = deleteVector->as<FlatVector<int16_t>>();
-              valueStr = std::to_string(vector->valueAt(row));
-              break;
-            }
-            case TypeKind::INTEGER: {
-              auto vector = deleteVector->as<FlatVector<int32_t>>();
-              valueStr = std::to_string(vector->valueAt(row));
-              break;
-            }
-            case TypeKind::BIGINT: {
-              auto vector = deleteVector->as<FlatVector<int64_t>>();
-              valueStr = std::to_string(vector->valueAt(row));
-              break;
-            }
-            case TypeKind::VARCHAR:
-            case TypeKind::VARBINARY: {
-              auto vector = deleteVector->as<FlatVector<StringView>>();
-              valueStr = vector->valueAt(row).str();
-              break;
-            }
-            default:
-              VELOX_FAIL(
-                  "Unsupported type for predicate: {}",
-                  mapTypeKindToName(columnType));
           }
-          rowPredicate += makeTypePredicate(columnName, columnType, valueStr);
+          if (deleteValues.empty()) {
+            return "";
+          }
+          return fmt::format(
+              "({} IS NULL OR {} NOT IN ({}))",
+              columnName,
+              columnName,
+              makeNotInList<TypeKind::TINYINT>(deleteValues));
         }
+        case TypeKind::SMALLINT: {
+          auto vector = deleteVector->as<FlatVector<int16_t>>();
+          std::vector<int16_t> deleteValues;
+          for (int row = 0; row < numDeletedRows; ++row) {
+            if (!vector->isNullAt(row)) {
+              deleteValues.push_back(vector->valueAt(row));
+            }
+          }
+          if (deleteValues.empty()) {
+            return "";
+          }
+          return fmt::format(
+              "({} IS NULL OR {} NOT IN ({}))",
+              columnName,
+              columnName,
+              makeNotInList<TypeKind::SMALLINT>(deleteValues));
+        }
+        case TypeKind::INTEGER: {
+          auto vector = deleteVector->as<FlatVector<int32_t>>();
+          std::vector<int32_t> deleteValues;
+          for (int row = 0; row < numDeletedRows; ++row) {
+            if (!vector->isNullAt(row)) {
+              deleteValues.push_back(vector->valueAt(row));
+            }
+          }
+          if (deleteValues.empty()) {
+            return "";
+          }
+          return fmt::format(
+              "({} IS NULL OR {} NOT IN ({}))",
+              columnName,
+              columnName,
+              makeNotInList<TypeKind::INTEGER>(deleteValues));
+        }
+        case TypeKind::BIGINT: {
+          auto vector = deleteVector->as<FlatVector<int64_t>>();
+          std::vector<int64_t> deleteValues;
+          for (int row = 0; row < numDeletedRows; ++row) {
+            if (!vector->isNullAt(row)) {
+              deleteValues.push_back(vector->valueAt(row));
+            }
+          }
+          if (deleteValues.empty()) {
+            return "";
+          }
+          return fmt::format(
+              "({} IS NULL OR {} NOT IN ({}))",
+              columnName,
+              columnName,
+              makeNotInList<TypeKind::BIGINT>(deleteValues));
+        }
+        case TypeKind::REAL: {
+          auto vector = deleteVector->as<FlatVector<float>>();
+          std::vector<float> deleteValues;
+          for (int row = 0; row < numDeletedRows; ++row) {
+            if (!vector->isNullAt(row)) {
+              deleteValues.push_back(vector->valueAt(row));
+            }
+          }
+          if (deleteValues.empty()) {
+            return "";
+          }
+          return fmt::format(
+              "({} IS NULL OR {} NOT IN ({}))",
+              columnName,
+              columnName,
+              makeNotInList<TypeKind::REAL>(deleteValues));
+        }
+        case TypeKind::DOUBLE: {
+          auto vector = deleteVector->as<FlatVector<double>>();
+          std::vector<double> deleteValues;
+          for (int row = 0; row < numDeletedRows; ++row) {
+            if (!vector->isNullAt(row)) {
+              deleteValues.push_back(vector->valueAt(row));
+            }
+          }
+          if (deleteValues.empty()) {
+            return "";
+          }
+          return fmt::format(
+              "({} IS NULL OR {} NOT IN ({}))",
+              columnName,
+              columnName,
+              makeNotInList<TypeKind::DOUBLE>(deleteValues));
+        }
+        case TypeKind::VARCHAR: {
+          auto vector = deleteVector->as<FlatVector<StringView>>();
+          std::vector<StringView> deleteValues;
+          for (int row = 0; row < numDeletedRows; ++row) {
+            if (!vector->isNullAt(row)) {
+              deleteValues.push_back(vector->valueAt(row));
+            }
+          }
+          if (deleteValues.empty()) {
+            return "";
+          }
+          return fmt::format(
+              "({} IS NULL OR {} NOT IN ({}))",
+              columnName,
+              columnName,
+              makeNotInList<TypeKind::VARCHAR>(deleteValues));
+        }
+        case TypeKind::VARBINARY: {
+          auto vector = deleteVector->as<FlatVector<StringView>>();
+          std::vector<StringView> deleteValues;
+          for (int row = 0; row < numDeletedRows; ++row) {
+            if (!vector->isNullAt(row)) {
+              deleteValues.push_back(vector->valueAt(row));
+            }
+          }
+          if (deleteValues.empty()) {
+            return "";
+          }
+          return fmt::format(
+              "({} IS NULL OR {} NOT IN ({}))",
+              columnName,
+              columnName,
+              makeNotInList<TypeKind::VARBINARY>(deleteValues));
+        }
+        default:
+          VELOX_FAIL(
+              "Unsupported type for predicate: {}",
+              mapTypeKindToName(columnType));
       }
+    } else {
+      // Multi-column delete - use row-by-row OR logic like original code
+      std::string predicates;
+      for (int32_t row = 0; row < numDeletedRows; ++row) {
+        std::string oneRow;
+        for (size_t i = 0; i < equalityFieldIds.size(); ++i) {
+          auto deleteVector = deleteRowVector->childAt(i);
+          auto fieldId = equalityFieldIds[i];
+          auto columnType = columnTypes[i];
+          std::string columnName = fmt::format("c{}", fieldId - 1);
 
-      rowPredicate += ")";
-      predicates += rowPredicate;
+          std::string predicate;
+          if (deleteVector->isNullAt(row)) {
+            predicate = fmt::format("({} IS NOT NULL)", columnName);
+          } else {
+            std::string valueStr;
+            switch (columnType) {
+              case TypeKind::TINYINT: {
+                auto vector = deleteVector->as<FlatVector<int8_t>>();
+                valueStr = std::to_string(vector->valueAt(row));
+                predicate = fmt::format("({} <> {})", columnName, valueStr);
+                break;
+              }
+              case TypeKind::SMALLINT: {
+                auto vector = deleteVector->as<FlatVector<int16_t>>();
+                valueStr = std::to_string(vector->valueAt(row));
+                predicate = fmt::format("({} <> {})", columnName, valueStr);
+                break;
+              }
+              case TypeKind::INTEGER: {
+                auto vector = deleteVector->as<FlatVector<int32_t>>();
+                valueStr = std::to_string(vector->valueAt(row));
+                predicate = fmt::format("({} <> {})", columnName, valueStr);
+                break;
+              }
+              case TypeKind::BIGINT: {
+                auto vector = deleteVector->as<FlatVector<int64_t>>();
+                valueStr = std::to_string(vector->valueAt(row));
+                predicate = fmt::format("({} <> {})", columnName, valueStr);
+                break;
+              }
+              case TypeKind::VARCHAR:
+              case TypeKind::VARBINARY: {
+                auto vector = deleteVector->as<FlatVector<StringView>>();
+                valueStr = vector->valueAt(row).str();
+                predicate = fmt::format("({} <> '{}')", columnName, valueStr);
+                break;
+              }
+              default:
+                VELOX_FAIL(
+                    "Unsupported type for predicate: {}",
+                    mapTypeKindToName(columnType));
+            }
+          }
+
+          oneRow = oneRow.empty()
+              ? predicate
+              : fmt::format("({} OR {})", oneRow, predicate);
+        }
+
+        predicates = predicates.empty()
+            ? oneRow
+            : fmt::format("{} AND {}", predicates, oneRow);
+      }
+      return predicates;
     }
-
-    return predicates;
   }
 
  public:
@@ -178,11 +407,13 @@ class IcebergReadEqualityDeleteTest
       const std::vector<NullParam>& nullParams,
       const std::vector<RowVectorPtr>& deleteVectors,
       const std::vector<int32_t>& equalityFieldIds,
-      std::string duckDbSql = "") {
+      std::string duckDbSql = "",
+      std::vector<RowVectorPtr> dataVectors = {}) {
     folly::SingletonVault::singleton()->registrationComplete();
 
-    std::vector<RowVectorPtr> dataVectors =
-        makeVectors(1, rowCount_, columnTypes, nullParams);
+    if (dataVectors.empty()) {
+      dataVectors = makeVectors(1, rowCount_, columnTypes, nullParams);
+    }
 
     // Write data file
     auto dataFilePath = TempFilePath::create();
@@ -288,12 +519,12 @@ class IcebergReadEqualityDeleteTest
   void testSubFieldEqualityDelete() {
     TestParams params = GetParam();
 
-    // Skip floating point types for this test
-    for (auto columnType : params.columnTypes) {
-      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE) {
-        GTEST_SKIP()
-            << "Skipping floating point types for testSubFieldEqualityDelete";
-      }
+    // Skip non-BIGINT types and non-NoNulls configurations for this test
+    if (params.columnTypes.size() > 1 ||
+        (params.columnTypes[0] != TypeKind::BIGINT ||
+         params.nullParamForData[0] != NullParam::kNoNulls)) {
+      GTEST_SKIP()
+          << "This testcase is only tested against single BIGINT column with no nulls";
     }
 
     folly::SingletonVault::singleton()->registrationComplete();
@@ -351,22 +582,12 @@ class IcebergReadEqualityDeleteTest
   void testFloatAndDoubleThrowsError() {
     TestParams params = GetParam();
 
-    // Only test floating point types for this test
-    bool hasFloatingPointTypes = false;
-    TypeKind floatingPointType = TypeKind::REAL; // Default, will be updated
-
-    for (auto columnType : params.columnTypes) {
-      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE) {
-        hasFloatingPointTypes = true;
-        floatingPointType = columnType;
-        break;
-      }
-    }
-
-    if (!hasFloatingPointTypes) {
+    if (!(params.columnTypes.size() == 1 &&
+          (params.columnTypes[0] == TypeKind::REAL ||
+           params.columnTypes[0] == TypeKind::DOUBLE) &&
+          params.nullParamForData[0] == NullParam::kNoNulls)) {
       GTEST_SKIP()
-          << "Skipping non-floating point types for testFloatAndDoubleThrowsError";
-      return;
+          << "This testcase is only tested against single REAL or DOUBLE column with no nulls";
     }
 
     // Create delete vectors using makeVectors
@@ -379,7 +600,7 @@ class IcebergReadEqualityDeleteTest
     }
 
     std::string expectedErrorMessage;
-    if (floatingPointType == TypeKind::REAL) {
+    if (params.columnTypes[0] == TypeKind::REAL) {
       expectedErrorMessage =
           "Iceberg does not allow DOUBLE or REAL columns as the equality delete columns: c0 : REAL";
       VELOX_ASSERT_THROW(
@@ -405,12 +626,11 @@ class IcebergReadEqualityDeleteTest
   void testDeleteFirstAndLastRows() {
     TestParams params = GetParam();
 
-    // Skip floating point types for this test
-    for (auto columnType : params.columnTypes) {
-      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE) {
-        GTEST_SKIP()
-            << "Skipping floating point types for testDeleteFirstAndLastRows";
-      }
+    if (params.columnTypes[0] == TypeKind::REAL ||
+        params.columnTypes[0] == TypeKind::DOUBLE ||
+        params.columnTypes[0] == TypeKind::HUGEINT) {
+      GTEST_SKIP()
+          << "Skipping unsupported types (REAL, DOUBLE, HUGEINT) for testDeleteFirstAndLastRows";
     }
 
     folly::SingletonVault::singleton()->registrationComplete();
@@ -493,9 +713,10 @@ class IcebergReadEqualityDeleteTest
 
     // Skip floating point types for this test
     for (auto columnType : params.columnTypes) {
-      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE) {
+      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE ||
+          columnType == TypeKind::HUGEINT) {
         GTEST_SKIP()
-            << "Skipping floating point types for testDeleteRandomRows";
+            << "Skipping unsupported types (REAL, DOUBLE, HUGEINT) for testDeleteRandomRows";
       }
     }
 
@@ -516,59 +737,11 @@ class IcebergReadEqualityDeleteTest
       columnNames.push_back(fmt::format("c{}", i));
       auto dataColumn = dataVectors[0]->childAt(i);
 
-      switch (params.columnTypes[i]) {
-        case TypeKind::TINYINT: {
-          auto flatVector = dataColumn->as<FlatVector<int8_t>>();
-          std::vector<int8_t> deleteValues;
-          for (auto idx : randomIndices) {
-            deleteValues.push_back(flatVector->valueAt(idx));
-          }
-          deleteVectorColumns.push_back(makeFlatVector<int8_t>(deleteValues));
-          break;
-        }
-        case TypeKind::SMALLINT: {
-          auto flatVector = dataColumn->as<FlatVector<int16_t>>();
-          std::vector<int16_t> deleteValues;
-          for (auto idx : randomIndices) {
-            deleteValues.push_back(flatVector->valueAt(idx));
-          }
-          deleteVectorColumns.push_back(makeFlatVector<int16_t>(deleteValues));
-          break;
-        }
-        case TypeKind::INTEGER: {
-          auto flatVector = dataColumn->as<FlatVector<int32_t>>();
-          std::vector<int32_t> deleteValues;
-          for (auto idx : randomIndices) {
-            deleteValues.push_back(flatVector->valueAt(idx));
-          }
-          deleteVectorColumns.push_back(makeFlatVector<int32_t>(deleteValues));
-          break;
-        }
-        case TypeKind::BIGINT: {
-          auto flatVector = dataColumn->as<FlatVector<int64_t>>();
-          std::vector<int64_t> deleteValues;
-          for (auto idx : randomIndices) {
-            deleteValues.push_back(flatVector->valueAt(idx));
-          }
-          deleteVectorColumns.push_back(makeFlatVector<int64_t>(deleteValues));
-          break;
-        }
-        case TypeKind::VARCHAR:
-        case TypeKind::VARBINARY: {
-          auto flatVector = dataColumn->as<FlatVector<StringView>>();
-          std::vector<StringView> deleteValues;
-          for (auto idx : randomIndices) {
-            deleteValues.push_back(flatVector->valueAt(idx));
-          }
-          deleteVectorColumns.push_back(
-              makeFlatVector<StringView>(deleteValues));
-          break;
-        }
-        default:
-          VELOX_FAIL(
-              "Unsupported type for testDeleteRandomRows: {}",
-              mapTypeKindToName(params.columnTypes[i]));
-      }
+      generateRandomDeleteValues(
+          params.columnTypes[i],
+          dataColumn,
+          randomIndices,
+          deleteVectorColumns);
     }
 
     std::vector<RowVectorPtr> deleteVectors = {
@@ -592,87 +765,23 @@ class IcebergReadEqualityDeleteTest
 
     // Skip floating point types for this test
     for (auto columnType : params.columnTypes) {
-      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE) {
-        GTEST_SKIP() << "Skipping floating point types for testDeleteAllRows";
+      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE ||
+          columnType == TypeKind::HUGEINT) {
+        GTEST_SKIP()
+            << "Skipping unsupported types (REAL, DOUBLE, HUGEINT) for testDeleteAllRows";
       }
     }
 
     folly::SingletonVault::singleton()->registrationComplete();
 
-    // Create test data using makeVectors
-    std::vector<RowVectorPtr> dataVectors =
-        makeVectors(1, rowCount_, params.columnTypes, params.nullParamForData);
-
-    // Create delete vectors with all row values
-    std::vector<VectorPtr> deleteVectorColumns;
-    std::vector<std::string> columnNames;
-
-    for (size_t i = 0; i < params.columnTypes.size(); ++i) {
-      columnNames.push_back(fmt::format("c{}", i));
-      auto dataColumn = dataVectors[0]->childAt(i);
-
-      switch (params.columnTypes[i]) {
-        case TypeKind::TINYINT: {
-          auto flatVector = dataColumn->as<FlatVector<int8_t>>();
-          std::vector<int8_t> deleteValues;
-          deleteValues.reserve(rowCount_);
-          for (int j = 0; j < rowCount_; ++j) {
-            deleteValues.push_back(flatVector->valueAt(j));
-          }
-          deleteVectorColumns.push_back(makeFlatVector<int8_t>(deleteValues));
-          break;
-        }
-        case TypeKind::SMALLINT: {
-          auto flatVector = dataColumn->as<FlatVector<int16_t>>();
-          std::vector<int16_t> deleteValues;
-          deleteValues.reserve(rowCount_);
-          for (int j = 0; j < rowCount_; ++j) {
-            deleteValues.push_back(flatVector->valueAt(j));
-          }
-          deleteVectorColumns.push_back(makeFlatVector<int16_t>(deleteValues));
-          break;
-        }
-        case TypeKind::INTEGER: {
-          auto flatVector = dataColumn->as<FlatVector<int32_t>>();
-          std::vector<int32_t> deleteValues;
-          deleteValues.reserve(rowCount_);
-          for (int j = 0; j < rowCount_; ++j) {
-            deleteValues.push_back(flatVector->valueAt(j));
-          }
-          deleteVectorColumns.push_back(makeFlatVector<int32_t>(deleteValues));
-          break;
-        }
-        case TypeKind::BIGINT: {
-          auto flatVector = dataColumn->as<FlatVector<int64_t>>();
-          std::vector<int64_t> deleteValues;
-          deleteValues.reserve(rowCount_);
-          for (int j = 0; j < rowCount_; ++j) {
-            deleteValues.push_back(flatVector->valueAt(j));
-          }
-          deleteVectorColumns.push_back(makeFlatVector<int64_t>(deleteValues));
-          break;
-        }
-        case TypeKind::VARCHAR:
-        case TypeKind::VARBINARY: {
-          auto flatVector = dataColumn->as<FlatVector<StringView>>();
-          std::vector<StringView> deleteValues;
-          deleteValues.reserve(rowCount_);
-          for (int j = 0; j < rowCount_; ++j) {
-            deleteValues.push_back(flatVector->valueAt(j));
-          }
-          deleteVectorColumns.push_back(
-              makeFlatVector<StringView>(deleteValues));
-          break;
-        }
-        default:
-          VELOX_FAIL(
-              "Unsupported type for testDeleteAllRows: {}",
-              mapTypeKindToName(params.columnTypes[i]));
-      }
-    }
-
-    std::vector<RowVectorPtr> deleteVectors = {
-        makeRowVector(columnNames, deleteVectorColumns)};
+    // Create delete vectors with all actual values from data (not preserving
+    // null pattern) The delete vectors should contain the actual data values,
+    // not nulls
+    std::vector<RowVectorPtr> deleteVectors = makeVectors(
+        1,
+        rowCount_,
+        params.columnTypes,
+        std::vector<NullParam>(params.columnTypes.size(), NullParam::kNoNulls));
 
     // Create equality field IDs (all columns)
     std::vector<int32_t> equalityFieldIds;
@@ -692,8 +801,10 @@ class IcebergReadEqualityDeleteTest
 
     // Skip floating point types for this test
     for (auto columnType : params.columnTypes) {
-      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE) {
-        GTEST_SKIP() << "Skipping floating point types for testDeleteNoRows";
+      if (columnType == TypeKind::REAL || columnType == TypeKind::DOUBLE ||
+          columnType == TypeKind::HUGEINT) {
+        GTEST_SKIP()
+            << "Skipping unsupported types (REAL, DOUBLE, HUGEINT) for testDeleteNoRows";
         return;
       }
     }
@@ -751,6 +862,152 @@ class IcebergReadEqualityDeleteTest
         deleteVectors,
         equalityFieldIds);
   }
+
+  void testShortDecimal() {
+    TestParams params = GetParam();
+
+    if (!(params.columnTypes.size() == 1 &&
+          params.columnTypes[0] == TypeKind::BIGINT &&
+          params.nullParamForData[0] == NullParam::kNoNulls)) {
+      GTEST_SKIP()
+          << "This testcase is only tested against BIGINT for short decimal";
+    }
+
+    folly::SingletonVault::singleton()->registrationComplete();
+
+    // Use DECIMAL(6, 2) for short decimal (precision 6, scale 2)
+    auto decimalType = DECIMAL(6, 2);
+    std::vector<int32_t> equalityFieldIds = {1};
+
+    // Test 1: Delete first and last short decimal values
+    std::vector<RowVectorPtr> shortDecimalDataVectors = {makeRowVector(
+        {"c0"},
+        {makeFlatVector<int64_t>(
+            {123456, 789012, 345678, 901234, 567890}, decimalType)})};
+
+    std::vector<RowVectorPtr> deleteVectors = {makeRowVector(
+        {"c0"}, {makeFlatVector<int64_t>({123456, 789012}, decimalType)})};
+
+    // Create DuckDB table for comparison
+    createDuckDbTable(shortDecimalDataVectors);
+
+    assertEqualityDeletes(
+        params.columnTypes,
+        params.nullParamForData,
+        deleteVectors,
+        equalityFieldIds,
+        "SELECT * FROM tmp WHERE c0 NOT IN (1234.56, 7890.12)",
+        shortDecimalDataVectors);
+
+    // Test 2: Delete all short decimal values
+    deleteVectors = {makeRowVector(
+        {"c0"},
+        {makeFlatVector<int64_t>(
+            {123456, 789012, 345678, 901234, 567890}, decimalType)})};
+
+    assertEqualityDeletes(
+        params.columnTypes,
+        params.nullParamForData,
+        deleteVectors,
+        equalityFieldIds,
+        "SELECT * FROM tmp WHERE 1 = 0",
+        shortDecimalDataVectors);
+
+    // Test 3: Delete none (empty short decimal delete vector)
+    deleteVectors = {makeRowVector(
+        {"c0"},
+        {makeFlatVector<int64_t>(std::vector<int64_t>{}, decimalType)})};
+
+    assertEqualityDeletes(
+        params.columnTypes,
+        params.nullParamForData,
+        deleteVectors,
+        equalityFieldIds,
+        "SELECT * FROM tmp",
+        shortDecimalDataVectors);
+  }
+
+  void testLongDecimal() {
+    TestParams params = GetParam();
+
+    if (!(params.columnTypes.size() == 1 &&
+          params.columnTypes[0] == TypeKind::HUGEINT &&
+          params.nullParamForData[0] == NullParam::kNoNulls)) {
+      GTEST_SKIP()
+          << "This testcase is only tested against HUGEINT for long decimal";
+    }
+
+    folly::SingletonVault::singleton()->registrationComplete();
+
+    // Use DECIMAL(25, 5) for long decimal (precision 25, scale 5)
+    auto decimalType = DECIMAL(25, 5);
+    std::vector<int32_t> equalityFieldIds = {1};
+
+    // Test 1: Delete first two long decimal values
+    // Values: 123456789012345 (represents 1234567890.12345), 987654321098765
+    // (represents 9876543210.98765)
+    std::vector<RowVectorPtr> longDecimalDataVectors = {makeRowVector(
+        {"c0"},
+        {makeFlatVector<int128_t>(
+            {int128_t(123456789012345),
+             int128_t(987654321098765),
+             int128_t(111111111111111),
+             int128_t(222222222222222),
+             int128_t(333333333333333)},
+            decimalType)})};
+
+    std::vector<RowVectorPtr> deleteVectors = {makeRowVector(
+        {"c0"},
+        {makeFlatVector<int128_t>(
+            {int128_t(123456789012345), int128_t(987654321098765)},
+            decimalType)})};
+
+    // Create DuckDB table for comparison
+    createDuckDbTable(longDecimalDataVectors);
+
+    VELOX_ASSERT_THROW(
+        assertEqualityDeletes(
+            params.columnTypes,
+            params.nullParamForData,
+            deleteVectors,
+            equalityFieldIds,
+            "SELECT * FROM tmp WHERE c0 NOT IN (1234567890.12345, 9876543210.98765)"),
+        "Decimal is not supported for DWRF.");
+
+    // Test 2: Delete all long decimal values
+    deleteVectors = {makeRowVector(
+        {"c0"},
+        {makeFlatVector<int128_t>(
+            {int128_t(123456789012345),
+             int128_t(987654321098765),
+             int128_t(111111111111111),
+             int128_t(222222222222222),
+             int128_t(333333333333333)},
+            decimalType)})};
+
+    VELOX_ASSERT_THROW(
+        assertEqualityDeletes(
+            params.columnTypes,
+            params.nullParamForData,
+            deleteVectors,
+            equalityFieldIds,
+            "SELECT * FROM tmp WHERE 1 = 0"),
+        "Decimal is not supported for DWRF.");
+
+    // Test 3: Delete none (empty long decimal delete vector)
+    deleteVectors = {makeRowVector(
+        {"c0"},
+        {makeFlatVector<int128_t>(std::vector<int128_t>{}, decimalType)})};
+
+    VELOX_ASSERT_THROW(
+        assertEqualityDeletes(
+            params.columnTypes,
+            params.nullParamForData,
+            deleteVectors,
+            equalityFieldIds,
+            "SELECT * FROM tmp"),
+        "Decimal is not supported for DWRF.");
+  }
 };
 
 TEST_P(IcebergReadEqualityDeleteTest, testSubFieldEqualityDelete) {
@@ -777,8 +1034,16 @@ TEST_P(IcebergReadEqualityDeleteTest, deleteNoRows) {
   testDeleteNoRows();
 }
 
-INSTANTIATE_TEST_SUITE_P(
-    AllTypes,
+TEST_P(IcebergReadEqualityDeleteTest, shortDecimal) {
+  testShortDecimal();
+}
+
+TEST_P(IcebergReadEqualityDeleteTest, LongDecimal) {
+  testLongDecimal();
+}
+
+VELOX_INSTANTIATE_TEST_SUITE_P(
+    AllTest,
     IcebergReadEqualityDeleteTest,
     testing::Values(
         // Single row tests - No nulls
@@ -805,102 +1070,45 @@ INSTANTIATE_TEST_SUITE_P(
         TestParams{{TypeKind::VARCHAR}, {NullParam::kAllNulls}},
         TestParams{{TypeKind::VARBINARY}, {NullParam::kAllNulls}},
 
-        // Test for float and real - for floatAndDoubleThrowsError test
+        // Failure testcase
         TestParams{{TypeKind::REAL}, {NullParam::kNoNulls}},
         TestParams{{TypeKind::DOUBLE}, {NullParam::kNoNulls}},
+        TestParams{{TypeKind::HUGEINT}, {NullParam::kNoNulls}},
 
-        // Multiple row tests - No nulls (two same-type columns)
+        // Multiple row tests
         TestParams{
             {TypeKind::TINYINT, TypeKind::TINYINT},
             {NullParam::kNoNulls, NullParam::kNoNulls}},
         TestParams{
             {TypeKind::SMALLINT, TypeKind::SMALLINT},
-            {NullParam::kNoNulls, NullParam::kNoNulls}},
-        TestParams{
-            {TypeKind::INTEGER, TypeKind::INTEGER},
-            {NullParam::kNoNulls, NullParam::kNoNulls}},
-        TestParams{
-            {TypeKind::BIGINT, TypeKind::BIGINT},
-            {NullParam::kNoNulls, NullParam::kNoNulls}},
-        TestParams{
-            {TypeKind::VARCHAR, TypeKind::VARCHAR},
-            {NullParam::kNoNulls, NullParam::kNoNulls}},
-        TestParams{
-            {TypeKind::VARBINARY, TypeKind::VARBINARY},
-            {NullParam::kNoNulls, NullParam::kNoNulls}},
-
-        // Multiple row tests - Partial nulls (two same-type columns)
-        TestParams{
-            {TypeKind::TINYINT, TypeKind::TINYINT},
-            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
-        TestParams{
-            {TypeKind::SMALLINT, TypeKind::SMALLINT},
-            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
-        TestParams{
-            {TypeKind::INTEGER, TypeKind::INTEGER},
-            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
-        TestParams{
-            {TypeKind::BIGINT, TypeKind::BIGINT},
-            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
-        TestParams{
-            {TypeKind::VARCHAR, TypeKind::VARCHAR},
-            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
-        TestParams{
-            {TypeKind::VARBINARY, TypeKind::VARBINARY},
-            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
-
-        // Multiple row tests - All nulls (two same-type columns)
-        TestParams{
-            {TypeKind::TINYINT, TypeKind::TINYINT},
-            {NullParam::kAllNulls, NullParam::kAllNulls}},
-        TestParams{
-            {TypeKind::SMALLINT, TypeKind::SMALLINT},
-            {NullParam::kAllNulls, NullParam::kAllNulls}},
-        TestParams{
-            {TypeKind::INTEGER, TypeKind::INTEGER},
-            {NullParam::kAllNulls, NullParam::kAllNulls}},
-        TestParams{
-            {TypeKind::BIGINT, TypeKind::BIGINT},
-            {NullParam::kAllNulls, NullParam::kAllNulls}},
-        TestParams{
-            {TypeKind::VARCHAR, TypeKind::VARCHAR},
-            {NullParam::kAllNulls, NullParam::kAllNulls}},
-        TestParams{
-            {TypeKind::VARBINARY, TypeKind::VARBINARY},
-            {NullParam::kAllNulls, NullParam::kAllNulls}},
-
-        // Mixed type tests (from former MixedTypeTestParams)
-        // Two column tests with the same types but different nulls
-        TestParams{
-            {TypeKind::BIGINT, TypeKind::BIGINT},
-            {NullParam::kNoNulls, NullParam::kPartialNulls}},
-        // Mixed type tests with TINYINT and VARCHAR
-        TestParams{
-            {TypeKind::TINYINT, TypeKind::VARCHAR},
-            {NullParam::kNoNulls, NullParam::kNoNulls}},
-        TestParams{
-            {TypeKind::TINYINT, TypeKind::VARCHAR},
-            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
-        // Mixed type tests with INTEGER and VARCHAR
-        TestParams{
-            {TypeKind::INTEGER, TypeKind::VARCHAR},
-            {NullParam::kNoNulls, NullParam::kNoNulls}},
-        TestParams{
-            {TypeKind::INTEGER, TypeKind::VARCHAR},
             {NullParam::kPartialNulls, NullParam::kNoNulls}},
         TestParams{
-            {TypeKind::INTEGER, TypeKind::VARCHAR},
-            {NullParam::kNoNulls, NullParam::kPartialNulls}},
+            {TypeKind::INTEGER, TypeKind::INTEGER},
+            {NullParam::kAllNulls, NullParam::kPartialNulls}},
         TestParams{
-            {TypeKind::INTEGER, TypeKind::VARCHAR},
-            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
-        // Mixed type tests with SMALLINT and VARBINARY
-        TestParams{
-            {TypeKind::SMALLINT, TypeKind::VARBINARY},
+            {TypeKind::BIGINT, TypeKind::BIGINT},
             {NullParam::kNoNulls, NullParam::kNoNulls}},
         TestParams{
-            {TypeKind::SMALLINT, TypeKind::VARBINARY},
-            {NullParam::kPartialNulls, NullParam::kPartialNulls}},
+            {TypeKind::VARCHAR, TypeKind::VARCHAR},
+            {NullParam::kPartialNulls, NullParam::kAllNulls}},
+        TestParams{
+            {TypeKind::VARBINARY, TypeKind::VARBINARY},
+            {NullParam::kAllNulls, NullParam::kNoNulls}},
+
+        // Mixed row type tests
+        TestParams{
+            {TypeKind::TINYINT, TypeKind::SMALLINT},
+            {NullParam::kNoNulls, NullParam::kNoNulls}},
+        TestParams{
+            {TypeKind::SMALLINT, TypeKind::VARCHAR},
+            {NullParam::kPartialNulls, NullParam::kNoNulls}},
+        TestParams{
+            {TypeKind::INTEGER, TypeKind::VARBINARY},
+            {NullParam::kAllNulls, NullParam::kPartialNulls}},
+        TestParams{
+            {TypeKind::BIGINT, TypeKind::VARBINARY},
+            {NullParam::kNoNulls, NullParam::kNoNulls}},
+
         // Three column mixed type tests
         TestParams{
             {TypeKind::INTEGER, TypeKind::VARCHAR, TypeKind::BIGINT},

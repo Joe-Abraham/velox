@@ -434,10 +434,9 @@ class IcebergReadPositionalDeleteTest : public IcebergTestBase {
           deleteValuesList += ", " + std::to_string(allDeleteValues[i]);
         }
       }
-      
+
       return fmt::format(
-          "SELECT * FROM tmp WHERE c0 NOT IN ({})",
-          deleteValuesList);
+          "SELECT * FROM tmp WHERE c0 NOT IN ({})", deleteValuesList);
     }
   }
 
