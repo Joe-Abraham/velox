@@ -16,6 +16,8 @@
 
 #include "velox/connectors/hive/iceberg/tests/IcebergTestBase.h"
 
+#include <map>
+#include <random>
 #include "connectors/hive/iceberg/IcebergSplit.h"
 #include "exec/tests/utils/PlanBuilder.h"
 
@@ -55,7 +57,7 @@ std::vector<T> IcebergTestBase::makeSequenceValues(
 template <TypeKind KIND>
 std::string IcebergTestBase::makeNotInList(
     const std::vector<typename TypeTraits<KIND>::NativeType>& deleteValues) {
-  using T = typename TypeTraits<KIND>::NativeType;
+  using T = TypeTraits<KIND>::NativeType;
   if (deleteValues.empty()) {
     return "";
   }
@@ -123,13 +125,12 @@ core::PlanNodePtr IcebergTestBase::tableScanNode(
 }
 
 template <TypeKind KIND>
-std::vector<RowVectorPtr> IcebergTestBase::makeVectors(
+std::vector<RowVectorPtr> IcebergTestBase::makeVectorsImpl(
     int32_t count,
     int32_t rowsPerVector,
     int32_t numColumns,
-    bool allNulls,
-    bool partialNull) {
-  using T = typename TypeTraits<KIND>::NativeType;
+    std::vector<NullParam> nullParam) {
+  using T = TypeTraits<KIND>::NativeType;
 
   // Sample strings for VARCHAR data generation
   const std::vector<std::string> sampleStrings = {
@@ -167,7 +168,7 @@ std::vector<RowVectorPtr> IcebergTestBase::makeVectors(
     for (int j = 0; j < numColumns; j++) {
       VectorPtr columnVector;
 
-      if (allNulls) {
+      if (nullParam[j] == NullParam::kAllNulls) {
         // Use allNullFlatVector for all-null columns
         columnVector = vectorMaker_.allNullFlatVector<T>(rowsPerVector);
       } else if constexpr (KIND == TypeKind::VARCHAR) {
@@ -212,14 +213,276 @@ std::vector<RowVectorPtr> IcebergTestBase::makeVectors(
         columnVector = vectorMaker_.flatVector<T>(floatData);
       } else {
         VELOX_FAIL(
-            "Unsupported type for makeVectors: {}", TypeTraits<KIND>::name);
+            "Unsupported type for makeVectorsImpl: {}", TypeTraits<KIND>::name);
       }
 
       // Apply partial nulls by randomly setting some positions to null
-      if (partialNull && !allNulls) {
+      if (nullParam[j] == NullParam::kPartialNulls) {
         std::mt19937 gen(42); // Fixed seed for reproducibility
         std::uniform_real_distribution<> dis(0.0, 1.0);
-        const double nullProbability = 0.2;
+        constexpr double nullProbability = 0.2;
+
+        for (vector_size_t idx = 0; idx < rowsPerVector; ++idx) {
+          if (dis(gen) < nullProbability) {
+            columnVector->setNull(idx, true);
+          }
+        }
+      }
+      vectors.push_back(columnVector);
+    }
+    rowVectors.push_back(makeRowVector(names, vectors));
+  }
+  return rowVectors;
+}
+
+std::vector<RowVectorPtr> IcebergTestBase::makeVectors(
+    int32_t count,
+    int32_t rowsPerVector,
+    const std::vector<TypeKind>& columnTypes,
+    const std::vector<NullParam>& nullParams) {
+  VELOX_CHECK_EQ(
+      columnTypes.size(),
+      nullParams.size(),
+      "columnTypes and nullParams must have the same size");
+
+  // Sample strings for VARCHAR/VARBINARY data generation
+  const std::vector<std::string> sampleStrings = {
+      "apple",     "banana",     "cherry",    "date",       "elderberry",
+      "fig",       "grape",      "honeydew",  "kiwi",       "lemon",
+      "mango",     "nectarine",  "orange",    "papaya",     "quince",
+      "raspberry", "strawberry", "tangerine", "watermelon", "zucchini"};
+
+  std::vector<TypePtr> types;
+  std::vector<std::string> names;
+
+  for (size_t i = 0; i < columnTypes.size(); ++i) {
+    switch (columnTypes[i]) {
+      case TypeKind::BOOLEAN:
+        types.push_back(createScalarType<TypeKind::BOOLEAN>());
+        break;
+      case TypeKind::TINYINT:
+        types.push_back(createScalarType<TypeKind::TINYINT>());
+        break;
+      case TypeKind::SMALLINT:
+        types.push_back(createScalarType<TypeKind::SMALLINT>());
+        break;
+      case TypeKind::INTEGER:
+        types.push_back(createScalarType<TypeKind::INTEGER>());
+        break;
+      case TypeKind::BIGINT:
+        types.push_back(createScalarType<TypeKind::BIGINT>());
+        break;
+      case TypeKind::REAL:
+        types.push_back(createScalarType<TypeKind::REAL>());
+        break;
+      case TypeKind::DOUBLE:
+        types.push_back(createScalarType<TypeKind::DOUBLE>());
+        break;
+      case TypeKind::VARCHAR:
+        types.push_back(createScalarType<TypeKind::VARCHAR>());
+        break;
+      case TypeKind::VARBINARY:
+        types.push_back(createScalarType<TypeKind::VARBINARY>());
+        break;
+      case TypeKind::TIMESTAMP:
+        types.push_back(createScalarType<TypeKind::TIMESTAMP>());
+        break;
+      case TypeKind::HUGEINT:
+        types.push_back(createScalarType<TypeKind::HUGEINT>());
+        break;
+      default:
+        VELOX_FAIL("Unsupported type: {}", mapTypeKindToName(columnTypes[i]));
+    }
+    names.push_back(fmt::format("c{}", i));
+  }
+
+  // Track the column index for each type to implement the repeat pattern
+  // Map from TypeKind to the current column index for that type
+  std::map<TypeKind, int> typeColumnIndex;
+
+  std::vector<RowVectorPtr> rowVectors;
+  for (int i = 0; i < count; i++) {
+    std::vector<VectorPtr> vectors;
+
+    // Reset type column indices for each row vector
+    typeColumnIndex.clear();
+
+    for (size_t j = 0; j < columnTypes.size(); ++j) {
+      VectorPtr columnVector;
+      TypeKind columnType = columnTypes[j];
+      NullParam nullParam = nullParams[j];
+
+      // Increment the column index for this type
+      typeColumnIndex[columnType]++;
+      int repeatCount = typeColumnIndex[columnType];
+
+      if (nullParam == NullParam::kAllNulls) {
+        // Create all-null vector based on type
+        switch (columnType) {
+          case TypeKind::BOOLEAN:
+            columnVector = vectorMaker_.allNullFlatVector<bool>(rowsPerVector);
+            break;
+          case TypeKind::TINYINT:
+            columnVector =
+                vectorMaker_.allNullFlatVector<int8_t>(rowsPerVector);
+            break;
+          case TypeKind::SMALLINT:
+            columnVector =
+                vectorMaker_.allNullFlatVector<int16_t>(rowsPerVector);
+            break;
+          case TypeKind::INTEGER:
+            columnVector =
+                vectorMaker_.allNullFlatVector<int32_t>(rowsPerVector);
+            break;
+          case TypeKind::BIGINT:
+            columnVector =
+                vectorMaker_.allNullFlatVector<int64_t>(rowsPerVector);
+            break;
+          case TypeKind::REAL:
+            columnVector = vectorMaker_.allNullFlatVector<float>(rowsPerVector);
+            break;
+          case TypeKind::DOUBLE:
+            columnVector =
+                vectorMaker_.allNullFlatVector<double>(rowsPerVector);
+            break;
+          case TypeKind::VARCHAR:
+          case TypeKind::VARBINARY:
+            columnVector =
+                vectorMaker_.allNullFlatVector<StringView>(rowsPerVector);
+            break;
+          case TypeKind::TIMESTAMP:
+            columnVector =
+                vectorMaker_.allNullFlatVector<Timestamp>(rowsPerVector);
+            break;
+          case TypeKind::HUGEINT:
+            columnVector =
+                vectorMaker_.allNullFlatVector<int128_t>(rowsPerVector);
+            break;
+          default:
+            VELOX_FAIL(
+                "Unsupported type for all-null vector: {}",
+                mapTypeKindToName(columnType));
+        }
+      } else {
+        // Create vector with data using the same logic as makeVectorsImpl
+        // Use repeatCount to implement the pattern where each column of the
+        // same type gets incrementally increasing repeat patterns
+        switch (columnType) {
+          case TypeKind::BOOLEAN: {
+            auto intData =
+                makeSequenceValues<int64_t>(rowsPerVector, repeatCount);
+            std::vector<bool> boolData;
+            boolData.reserve(intData.size());
+            for (auto val : intData) {
+              boolData.push_back(val % 2 == 0);
+            }
+            columnVector = vectorMaker_.flatVector<bool>(boolData);
+            break;
+          }
+          case TypeKind::TINYINT: {
+            auto data = makeSequenceValues<int8_t>(rowsPerVector, repeatCount);
+            columnVector = vectorMaker_.flatVector<int8_t>(data);
+            break;
+          }
+          case TypeKind::SMALLINT: {
+            auto data = makeSequenceValues<int16_t>(rowsPerVector, repeatCount);
+            columnVector = vectorMaker_.flatVector<int16_t>(data);
+            break;
+          }
+          case TypeKind::INTEGER: {
+            auto data = makeSequenceValues<int32_t>(rowsPerVector, repeatCount);
+            columnVector = vectorMaker_.flatVector<int32_t>(data);
+            break;
+          }
+          case TypeKind::BIGINT: {
+            auto data = makeSequenceValues<int64_t>(rowsPerVector, repeatCount);
+            columnVector = vectorMaker_.flatVector<int64_t>(data);
+            break;
+          }
+          case TypeKind::REAL: {
+            auto intData =
+                makeSequenceValues<int64_t>(rowsPerVector, repeatCount);
+            std::vector<float> floatData;
+            floatData.reserve(intData.size());
+            for (auto val : intData) {
+              floatData.push_back(static_cast<float>(val) + 0.5f);
+            }
+            columnVector = vectorMaker_.flatVector<float>(floatData);
+            break;
+          }
+          case TypeKind::DOUBLE: {
+            auto intData =
+                makeSequenceValues<int64_t>(rowsPerVector, repeatCount);
+            std::vector<double> doubleData;
+            doubleData.reserve(intData.size());
+            for (auto val : intData) {
+              doubleData.push_back(static_cast<double>(val) + 0.5);
+            }
+            columnVector = vectorMaker_.flatVector<double>(doubleData);
+            break;
+          }
+          case TypeKind::VARCHAR: {
+            auto intData =
+                makeSequenceValues<int64_t>(rowsPerVector, repeatCount);
+            auto stringVector = BaseVector::create<FlatVector<StringView>>(
+                VARCHAR(), rowsPerVector, pool_.get());
+
+            for (int idx = 0; idx < rowsPerVector; ++idx) {
+              auto stringIndex = intData[idx] % sampleStrings.size();
+              const std::string& selectedString = sampleStrings[stringIndex];
+              stringVector->set(idx, StringView(selectedString));
+            }
+            columnVector = stringVector;
+            break;
+          }
+          case TypeKind::VARBINARY: {
+            auto intData =
+                makeSequenceValues<int64_t>(rowsPerVector, repeatCount);
+            auto binaryVector = BaseVector::create<FlatVector<StringView>>(
+                VARBINARY(), rowsPerVector, pool_.get());
+
+            for (int idx = 0; idx < rowsPerVector; ++idx) {
+              auto stringIndex = intData[idx] % sampleStrings.size();
+              const std::string& baseString = sampleStrings[stringIndex];
+
+              std::string binaryStr;
+              for (char c : baseString) {
+                binaryStr += static_cast<unsigned char>(c);
+              }
+              binaryVector->set(idx, StringView(binaryStr));
+            }
+            columnVector = binaryVector;
+            break;
+          }
+          case TypeKind::TIMESTAMP: {
+            auto intData =
+                makeSequenceValues<int64_t>(rowsPerVector, repeatCount);
+            std::vector<Timestamp> timestampData;
+            timestampData.reserve(intData.size());
+            for (auto val : intData) {
+              timestampData.push_back(Timestamp(val, 0));
+            }
+            columnVector = vectorMaker_.flatVector<Timestamp>(timestampData);
+            break;
+          }
+          case TypeKind::HUGEINT: {
+            auto data =
+                makeSequenceValues<int128_t>(rowsPerVector, repeatCount);
+            columnVector = vectorMaker_.flatVector<int128_t>(data);
+            break;
+          }
+          default:
+            VELOX_FAIL(
+                "Unsupported type for makeVectors: {}",
+                mapTypeKindToName(columnType));
+        }
+      }
+
+      // Apply partial nulls by randomly setting some positions to null
+      if (nullParam == NullParam::kPartialNulls) {
+        std::mt19937 gen(42); // Fixed seed for reproducibility
+        std::uniform_real_distribution<> dis(0.0, 1.0);
+        constexpr double nullProbability = 0.2;
 
         for (vector_size_t idx = 0; idx < rowsPerVector; ++idx) {
           if (dis(gen) < nullProbability) {
@@ -233,9 +496,6 @@ std::vector<RowVectorPtr> IcebergTestBase::makeVectors(
 
     rowVectors.push_back(makeRowVector(names, vectors));
   }
-
-  rowType_ = std::make_shared<RowType>(std::move(names), std::move(types));
-
   return rowVectors;
 }
 
@@ -283,32 +543,78 @@ template std::string IcebergTestBase::makeNotInList<TypeKind::TIMESTAMP>(
 template std::string IcebergTestBase::makeNotInList<TypeKind::HUGEINT>(
     const std::vector<int128_t>&);
 
-// Explicit template instantiations for makeVectors
-template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
-    TypeKind::BOOLEAN>(int32_t, int32_t, int32_t, bool, bool);
-template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
-    TypeKind::TINYINT>(int32_t, int32_t, int32_t, bool, bool);
-template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
-    TypeKind::SMALLINT>(int32_t, int32_t, int32_t, bool, bool);
-template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
-    TypeKind::INTEGER>(int32_t, int32_t, int32_t, bool, bool);
-template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
-    TypeKind::BIGINT>(int32_t, int32_t, int32_t, bool, bool);
-template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<TypeKind::REAL>(
+// Explicit template instantiations for makeVectorsImpl
+template std::vector<RowVectorPtr>
+IcebergTestBase::makeVectorsImpl<TypeKind::BOOLEAN>(
     int32_t,
     int32_t,
     int32_t,
-    bool,
-    bool);
-template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
-    TypeKind::DOUBLE>(int32_t, int32_t, int32_t, bool, bool);
-template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
-    TypeKind::VARCHAR>(int32_t, int32_t, int32_t, bool, bool);
-template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
-    TypeKind::VARBINARY>(int32_t, int32_t, int32_t, bool, bool);
-template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
-    TypeKind::TIMESTAMP>(int32_t, int32_t, int32_t, bool, bool);
-template std::vector<RowVectorPtr> IcebergTestBase::makeVectors<
-    TypeKind::HUGEINT>(int32_t, int32_t, int32_t, bool, bool);
+    std::vector<NullParam> nullParam);
+
+template std::vector<RowVectorPtr>
+IcebergTestBase::makeVectorsImpl<TypeKind::TINYINT>(
+    int32_t,
+    int32_t,
+    int32_t,
+    std::vector<NullParam> nullParam);
+template std::vector<RowVectorPtr>
+IcebergTestBase::makeVectorsImpl<TypeKind::SMALLINT>(
+    int32_t,
+    int32_t,
+    int32_t,
+    std::vector<NullParam> nullParam);
+template std::vector<RowVectorPtr>
+IcebergTestBase::makeVectorsImpl<TypeKind::INTEGER>(
+    int32_t,
+    int32_t,
+    int32_t,
+    std::vector<NullParam> nullParam);
+template std::vector<RowVectorPtr>
+IcebergTestBase::makeVectorsImpl<TypeKind::BIGINT>(
+    int32_t,
+    int32_t,
+    int32_t,
+    std::vector<NullParam> nullParam);
+template std::vector<RowVectorPtr>
+IcebergTestBase::makeVectorsImpl<TypeKind::REAL>(
+    int32_t,
+    int32_t,
+    int32_t,
+    std::vector<NullParam> nullParam);
+
+template std::vector<RowVectorPtr>
+IcebergTestBase::makeVectorsImpl<TypeKind::DOUBLE>(
+    int32_t,
+    int32_t,
+    int32_t,
+    std::vector<NullParam> nullParam);
+
+template std::vector<RowVectorPtr>
+IcebergTestBase::makeVectorsImpl<TypeKind::VARCHAR>(
+    int32_t,
+    int32_t,
+    int32_t,
+    std::vector<NullParam> nullParam);
+
+template std::vector<RowVectorPtr>
+IcebergTestBase::makeVectorsImpl<TypeKind::VARBINARY>(
+    int32_t,
+    int32_t,
+    int32_t,
+    std::vector<NullParam> nullParam);
+
+template std::vector<RowVectorPtr>
+IcebergTestBase::makeVectorsImpl<TypeKind::TIMESTAMP>(
+    int32_t,
+    int32_t,
+    int32_t,
+    std::vector<NullParam> nullParam);
+
+template std::vector<RowVectorPtr>
+IcebergTestBase::makeVectorsImpl<TypeKind::HUGEINT>(
+    int32_t,
+    int32_t,
+    int32_t,
+    std::vector<NullParam> nullParam);
 
 } // namespace facebook::velox::connector::hive::iceberg

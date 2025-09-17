@@ -36,6 +36,9 @@ class IcebergReadPositionalDeleteTest : public IcebergTestBase {
 #endif
   }
 
+ private:
+  RowTypePtr rowType_{ROW({"c0"}, {BIGINT()})};
+
  protected:
   /// Create 1 base data file data_file_1 with 2 RowGroups of 10000 rows each.
   /// Also create 1 delete file delete_file_1 which contains delete positions
@@ -424,9 +427,16 @@ class IcebergReadPositionalDeleteTest : public IcebergTestBase {
         numRowsInPreviousBaseFiles += baseFileSize.second;
       }
 
+      std::string deleteValuesList;
+      if (!allDeleteValues.empty()) {
+        deleteValuesList = std::to_string(allDeleteValues[0]);
+        for (size_t i = 1; i < allDeleteValues.size(); ++i) {
+          deleteValuesList += ", " + std::to_string(allDeleteValues[i]);
+        }
+      }
+
       return fmt::format(
-          "SELECT * FROM tmp WHERE c0 NOT IN ({})",
-          makeNotInList<TypeKind::BIGINT>(allDeleteValues));
+          "SELECT * FROM tmp WHERE c0 NOT IN ({})", deleteValuesList);
     }
   }
 
