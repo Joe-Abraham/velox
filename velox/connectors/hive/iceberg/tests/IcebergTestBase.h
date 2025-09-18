@@ -90,5 +90,15 @@ class IcebergTestBase : public HiveConnectorTestBase {
 
   std::map<std::string, std::shared_ptr<TempFilePath>> writeDataFiles(
       const WriteDataFilesConfig& config);
+
+  // Simple overloads that maintain original calling patterns for minimal test changes
+  std::vector<std::shared_ptr<TempFilePath>> writeDataFiles(
+      uint64_t numRows,
+      int32_t numColumns = 1,
+      int32_t splitCount = 1,
+      std::vector<RowVectorPtr> dataVectors = {});
+
+  std::map<std::string, std::shared_ptr<TempFilePath>> writeDataFiles(
+      const std::map<std::string, std::vector<int64_t>>& rowGroupSizesForFiles);
 };
 } // namespace facebook::velox::connector::hive::iceberg

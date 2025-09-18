@@ -218,11 +218,8 @@ class IcebergReadPositionalDeleteTest : public IcebergTestBase {
       int32_t splitCount = 1) {
     // Keep the reference to the deleteFilePath, otherwise the corresponding
     // file will be deleted.
-    IcebergTestBase::WriteDataFilesConfig config;
-    config.rowGroupSizesForFiles = rowGroupSizesForFiles;
-    config.useConfigAndFlushPolicy = true;
     std::map<std::string, std::shared_ptr<TempFilePath>> dataFilePaths =
-        writeDataFiles(config);
+        writeDataFiles(rowGroupSizesForFiles);
     std::unordered_map<
         std::string,
         std::pair<int64_t, std::shared_ptr<TempFilePath>>>

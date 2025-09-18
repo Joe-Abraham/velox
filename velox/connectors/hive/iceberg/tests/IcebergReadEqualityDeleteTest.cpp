@@ -268,14 +268,7 @@ class IcebergReadEqualityDeleteTest
               makeFlatVector<int64_t>(
                   20, [](auto row) { return row + 1; })})})};
     int32_t numDataColumns = 1;
-    IcebergTestBase::WriteDataFilesConfig config;
-    config.numRows = rowCount_;
-    config.numColumns = numDataColumns;
-    config.splitCount = 1;
-    config.dataVectors = dataVectors;
-    config.useConfigAndFlushPolicy = false;
-    auto dataFilePaths = writeDataFiles(config);
-    dataFilePath = dataFilePaths["data_file_0"];
+    dataFilePath = writeDataFiles(rowCount_, numDataColumns, 1, dataVectors)[0];
 
     // Write the delete file. Equality delete field is c_row.c1
     std::vector<IcebergDeleteFile> deleteFiles;
