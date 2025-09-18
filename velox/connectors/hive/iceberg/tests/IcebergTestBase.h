@@ -45,10 +45,6 @@ class IcebergTestBase : public HiveConnectorTestBase {
   template <class T>
   std::vector<T> makeSequenceValues(int32_t numRows, int8_t repeat = 1);
 
-  template <TypeKind KIND>
-  std::string makeNotInList(
-      const std::vector<typename TypeTraits<KIND>::NativeType>& deleteValues);
-
   core::PlanNodePtr tableScanNode(const RowTypePtr& outputRowType) const;
 
   std::vector<std::shared_ptr<ConnectorSplit>> makeIcebergSplits(
@@ -66,25 +62,32 @@ class IcebergTestBase : public HiveConnectorTestBase {
       const std::vector<TypeKind>& columnTypes,
       const std::vector<NullParam>& nullParams);
 
+  std::string makeTypePredicates(
+    const std::vector<RowVectorPtr>& deleteVectors,
+    const std::vector<int32_t>& equalityFieldIds,
+    const std::vector<TypeKind>& columnTypes);
+
   /// Unified writeDataFiles function that handles all use cases
   /// @param config Configuration for file structure and data generation
-  /// @return Map of file names to their corresponding file paths (or indexed names for simple cases)
+  /// @return Map of file names to their corresponding file paths (or indexed
+  /// names for simple cases)
   struct WriteDataFilesConfig {
     // Basic parameters
     uint64_t numRows = 20000;
     int32_t numColumns = 1;
     int32_t splitCount = 1;
-    
+
     // Advanced parameters for complex row group structures
-    std::optional<std::map<std::string, std::vector<int64_t>>> rowGroupSizesForFiles;
-    
+    std::optional<std::map<std::string, std::vector<int64_t>>>
+        rowGroupSizesForFiles;
+
     // Custom data vectors (takes precedence if provided)
     std::vector<RowVectorPtr> dataVectors;
-    
+
     // File writing configuration
-    bool useConfigAndFlushPolicy = false;  // true for positional deletes, false for equality deletes
+    bool useConfigAndFlushPolicy =false;
   };
-  
+
   std::map<std::string, std::shared_ptr<TempFilePath>> writeDataFiles(
       const WriteDataFilesConfig& config);
 };
