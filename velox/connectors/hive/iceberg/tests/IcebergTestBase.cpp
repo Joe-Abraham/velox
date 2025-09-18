@@ -468,42 +468,6 @@ std::map<std::string, std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataF
   return dataFilePaths;
 }
 
-std::vector<std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataFiles(
-    uint64_t numRows,
-    int32_t numColumns,
-    int32_t splitCount,
-    std::vector<RowVectorPtr> dataVectors) {
-  WriteDataFilesConfig config;
-  config.numRows = numRows;
-  config.numColumns = numColumns;
-  config.splitCount = splitCount;
-  config.dataVectors = std::move(dataVectors);
-  config.useConfigAndFlushPolicy = false;  // Equality deletes use simple writeToFile
-  
-  auto namedFilePaths = writeDataFiles(config);
-  
-  // Convert to vector in order for backward compatibility
-  std::vector<std::shared_ptr<TempFilePath>> dataFilePaths;
-  dataFilePaths.reserve(splitCount);
-  for (int i = 0; i < splitCount; i++) {
-    std::string fileName = fmt::format("data_file_{}", i);
-    dataFilePaths.push_back(namedFilePaths[fileName]);
-  }
-  
-  return dataFilePaths;
-}
-
-std::map<std::string, std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataFiles(
-    const std::map<std::string, std::vector<int64_t>>& rowGroupSizesForFiles,
-    int32_t numColumns) {
-  WriteDataFilesConfig config;
-  config.numColumns = numColumns;
-  config.rowGroupSizesForFiles = rowGroupSizesForFiles;
-  config.useConfigAndFlushPolicy = true;  // Positional deletes use config and flush policy
-  
-  return writeDataFiles(config);
-}
-
 // Explicit template instantiations for makeSequenceValues
 template std::vector<bool> IcebergTestBase::makeSequenceValues<bool>(
     int32_t,
