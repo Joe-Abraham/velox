@@ -15,6 +15,7 @@
  */
 
 #include <folly/Singleton.h>
+
 #include "velox/connectors/hive/iceberg/IcebergMetadataColumns.h"
 #include "velox/connectors/hive/iceberg/IcebergSplit.h"
 #include "velox/connectors/hive/iceberg/tests/IcebergTestBase.h"
