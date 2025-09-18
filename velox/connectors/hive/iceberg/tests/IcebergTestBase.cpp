@@ -387,6 +387,59 @@ std::vector<RowVectorPtr> IcebergTestBase::makeVectors(
   return rowVectors;
 }
 
+std::vector<std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataFiles(
+    uint64_t numRows,
+    int32_t numColumns,
+    int32_t splitCount,
+    std::vector<RowVectorPtr> dataVectors) {
+  if (dataVectors.empty()) {
+    std::vector<TypeKind> columnTypes(numColumns, TypeKind::BIGINT);
+    std::vector<NullParam> nullParams(numColumns, NullParam::kNoNulls);
+    dataVectors = makeVectors(splitCount, numRows, columnTypes, nullParams);
+  }
+  VELOX_CHECK_EQ(dataVectors.size(), splitCount);
+  std::vector<std::shared_ptr<TempFilePath>> dataFilePaths;
+  dataFilePaths.reserve(splitCount);
+  for (auto i = 0; i < splitCount; i++) {
+    dataFilePaths.emplace_back(TempFilePath::create());
+    writeToFile(dataFilePaths.back()->getPath(), dataVectors[i]);
+  }
+  createDuckDbTable(dataVectors);
+  return dataFilePaths;
+}
+
+std::map<std::string, std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataFiles(
+    const std::map<std::string, std::vector<int64_t>>& rowGroupSizesForFiles) {
+  std::map<std::string, std::shared_ptr<TempFilePath>> dataFilePaths;
+  std::vector<RowVectorPtr> dataVectorsJoined;
+  dataVectorsJoined.reserve(rowGroupSizesForFiles.size());
+  int64_t startingValue = 0;
+  for (const auto& dataFile : rowGroupSizesForFiles) {
+    dataFilePaths[dataFile.first] = TempFilePath::create();
+    std::vector<RowVectorPtr> dataVectors;
+    dataVectors.reserve(dataFile.second.size());
+    for (int64_t size : dataFile.second) {
+      std::vector<int64_t> data;
+      data.reserve(size);
+      for (int64_t i = 0; i < size; ++i) {
+        data.push_back(startingValue + i);
+      }
+      VectorPtr c0 = makeFlatVector<int64_t>(data);
+      dataVectors.push_back(makeRowVector({"c0"}, {c0}));
+      startingValue += size;
+    }
+    writeToFile(
+        dataFilePaths[dataFile.first]->getPath(),
+        dataVectors,
+        config_,
+        flushPolicyFactory_);
+    dataVectorsJoined.insert(
+        dataVectorsJoined.end(), dataVectors.begin(), dataVectors.end());
+  }
+  createDuckDbTable(dataVectorsJoined);
+  return dataFilePaths;
+}
+
 // Explicit template instantiations for makeSequenceValues
 template std::vector<bool> IcebergTestBase::makeSequenceValues<bool>(
     int32_t,

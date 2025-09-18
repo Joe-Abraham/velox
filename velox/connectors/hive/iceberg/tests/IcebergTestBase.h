@@ -65,5 +65,15 @@ class IcebergTestBase : public HiveConnectorTestBase {
       int32_t rowsPerVector,
       const std::vector<TypeKind>& columnTypes,
       const std::vector<NullParam>& nullParams);
+
+  std::vector<std::shared_ptr<TempFilePath>> writeDataFiles(
+      uint64_t numRows,
+      int32_t numColumns = 1,
+      int32_t splitCount = 1,
+      std::vector<RowVectorPtr> dataVectors = {});
+
+  std::map<std::string, std::shared_ptr<TempFilePath>> writeDataFiles(
+      const std::map<std::string, std::vector<int64_t>>&
+          rowGroupSizesForFiles);
 };
 } // namespace facebook::velox::connector::hive::iceberg

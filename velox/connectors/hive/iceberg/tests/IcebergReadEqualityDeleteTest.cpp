@@ -475,29 +475,6 @@ class IcebergReadEqualityDeleteTest
     ASSERT_TRUE(it->second.peakMemoryBytes > 0);
   }
 
-  std::vector<std::shared_ptr<TempFilePath>> writeDataFiles(
-      uint64_t numRows,
-      int32_t numColumns = 1,
-      int32_t splitCount = 1,
-      std::vector<RowVectorPtr> dataVectors = {}) {
-    if (dataVectors.empty()) {
-      std::vector<TypeKind> columnTypes(numColumns, TypeKind::BIGINT);
-      std::vector<NullParam> nullParams(numColumns, NullParam::kNoNulls);
-      dataVectors = makeVectors(splitCount, numRows, columnTypes, nullParams);
-    }
-    VELOX_CHECK_EQ(dataVectors.size(), splitCount);
-
-    std::vector<std::shared_ptr<TempFilePath>> dataFilePaths;
-    dataFilePaths.reserve(splitCount);
-    for (auto i = 0; i < splitCount; i++) {
-      dataFilePaths.emplace_back(TempFilePath::create());
-      writeToFile(dataFilePaths.back()->getPath(), dataVectors[i]);
-    }
-
-    createDuckDbTable(dataVectors);
-    return dataFilePaths;
-  }
-
   void testSubFieldEqualityDelete() {
     TestParams params = GetParam();
 

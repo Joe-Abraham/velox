@@ -440,48 +440,6 @@ class IcebergReadPositionalDeleteTest : public IcebergTestBase {
     }
   }
 
-  /// Write data files with specified row group structures
-  std::map<std::string, std::shared_ptr<TempFilePath>> writeDataFiles(
-      const std::map<std::string, std::vector<int64_t>>&
-          rowGroupSizesForFiles) {
-    std::map<std::string, std::shared_ptr<TempFilePath>> dataFilePaths;
-    std::vector<RowVectorPtr> dataVectorsJoined;
-    dataVectorsJoined.reserve(rowGroupSizesForFiles.size());
-
-    int64_t startingValue = 0;
-    for (const auto& dataFile : rowGroupSizesForFiles) {
-      dataFilePaths[dataFile.first] = TempFilePath::create();
-
-      std::vector<RowVectorPtr> dataVectors;
-      dataVectors.reserve(dataFile.second.size());
-
-      for (int64_t size : dataFile.second) {
-        std::vector<int64_t> data;
-        data.reserve(size);
-        for (int64_t i = 0; i < size; ++i) {
-          data.push_back(startingValue + i);
-        }
-
-        VectorPtr c0 = makeFlatVector<int64_t>(data);
-        dataVectors.push_back(makeRowVector({"c0"}, {c0}));
-        startingValue += size;
-      }
-
-      writeToFile(
-          dataFilePaths[dataFile.first]->getPath(),
-          dataVectors,
-          config_,
-          flushPolicyFactory_);
-
-      for (const auto& vector : dataVectors) {
-        dataVectorsJoined.push_back(vector);
-      }
-    }
-
-    createDuckDbTable(dataVectorsJoined);
-    return dataFilePaths;
-  }
-
   std::shared_ptr<IcebergMetadataColumn> pathColumn_ =
       IcebergMetadataColumn::icebergDeleteFilePathColumn();
   std::shared_ptr<IcebergMetadataColumn> posColumn_ =
