@@ -22,7 +22,39 @@
 #include "exec/tests/utils/PlanBuilder.h"
 
 namespace facebook::velox::connector::hive::iceberg {
+namespace {
+template <TypeKind KIND>
+std::string makeNotInList(
+    const std::vector<typename TypeTraits<KIND>::NativeType>& deleteValues) {
+  using T = TypeTraits<KIND>::NativeType;
+  if (deleteValues.empty()) {
+    return "";
+  }
 
+  if constexpr (KIND == TypeKind::BOOLEAN) {
+    VELOX_FAIL("Unsupported Type : {}", TypeTraits<KIND>::name);
+  } else if constexpr (
+      KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
+    return std::accumulate(
+        deleteValues.begin() + 1,
+        deleteValues.end(),
+        fmt::format("'{}'", to<std::string>(deleteValues[0])),
+        [](const std::string& a, const T& b) {
+          return a + fmt::format(", '{}'", to<std::string>(b));
+        });
+  } else if (std::is_integral_v<T> || std::is_floating_point_v<T>) {
+    return std::accumulate(
+        deleteValues.begin() + 1,
+        deleteValues.end(),
+        to<std::string>(deleteValues[0]),
+        [](const std::string& a, const T& b) {
+          return a + ", " + to<std::string>(b);
+        });
+  } else {
+    VELOX_FAIL("Unsupported Type : {}", TypeTraits<KIND>::name);
+  }
+}
+} // namespace
 std::vector<int64_t> IcebergTestBase::makeRandomDeleteValues(
     int32_t maxRowNumber) {
   std::mt19937 gen{0};
@@ -52,38 +84,6 @@ std::vector<T> IcebergTestBase::makeSequenceValues(
   }
   values.resize(numRows);
   return values;
-}
-
-template <TypeKind KIND>
-std::string IcebergTestBase::makeNotInList(
-    const std::vector<typename TypeTraits<KIND>::NativeType>& deleteValues) {
-  using T = TypeTraits<KIND>::NativeType;
-  if (deleteValues.empty()) {
-    return "";
-  }
-
-  if constexpr (KIND == TypeKind::BOOLEAN) {
-    VELOX_FAIL("Unsupported Type : {}", TypeTraits<KIND>::name);
-  } else if constexpr (
-      KIND == TypeKind::VARCHAR || KIND == TypeKind::VARBINARY) {
-    return std::accumulate(
-        deleteValues.begin() + 1,
-        deleteValues.end(),
-        fmt::format("'{}'", to<std::string>(deleteValues[0])),
-        [](const std::string& a, const T& b) {
-          return a + fmt::format(", '{}'", to<std::string>(b));
-        });
-  } else if (std::is_integral_v<T> || std::is_floating_point_v<T>) {
-    return std::accumulate(
-        deleteValues.begin() + 1,
-        deleteValues.end(),
-        to<std::string>(deleteValues[0]),
-        [](const std::string& a, const T& b) {
-          return a + ", " + to<std::string>(b);
-        });
-  } else {
-    VELOX_FAIL("Unsupported Type : {}", TypeTraits<KIND>::name);
-  }
 }
 
 std::vector<std::shared_ptr<ConnectorSplit>> IcebergTestBase::makeIcebergSplits(
@@ -387,57 +387,351 @@ std::vector<RowVectorPtr> IcebergTestBase::makeVectors(
   return rowVectors;
 }
 
+std::map<std::string, std::shared_ptr<TempFilePath>>
+IcebergTestBase::writeDataFiles(const WriteDataFilesConfig& config) {
+  std::map<std::string, std::shared_ptr<TempFilePath>> dataFilePaths;
+  std::vector<RowVectorPtr> dataVectorsJoined;
+
+  // Handle custom dataVectors case first
+  if (!config.dataVectors.empty()) {
+    for (int i = 0; i < config.dataVectors.size(); i++) {
+      std::string fileName = fmt::format("data_file_{}", i);
+      dataFilePaths[fileName] = TempFilePath::create();
+      writeToFile(dataFilePaths[fileName]->getPath(), config.dataVectors[i]);
+    }
+    createDuckDbTable(config.dataVectors);
+    return dataFilePaths;
+  }
+
+  // Determine file structure - either from rowGroupSizesForFiles or generate
+  // simple structure
+  std::map<std::string, std::vector<int64_t>> fileStructure;
+  if (config.rowGroupSizesForFiles.has_value()) {
+    fileStructure = config.rowGroupSizesForFiles.value();
+  } else {
+    // Generate simple uniform structure
+    for (int i = 0; i < config.splitCount; i++) {
+      std::string fileName = fmt::format("data_file_{}", i);
+      fileStructure[fileName] = {static_cast<int64_t>(config.numRows)};
+    }
+  }
+
+  // Create data files using unified approach
+  dataVectorsJoined.reserve(fileStructure.size());
+  int64_t startingValue = 0;
+
+  for (const auto& dataFile : fileStructure) {
+    dataFilePaths[dataFile.first] = TempFilePath::create();
+    std::vector<RowVectorPtr> dataVectors;
+    dataVectors.reserve(dataFile.second.size());
+
+    // Use makeVectors to create data instead of manually creating vectors
+    for (int64_t size : dataFile.second) {
+      // Create vectors with the specified number of columns, all BIGINT
+      std::vector<TypeKind> columnTypes(config.numColumns, TypeKind::BIGINT);
+      std::vector<NullParam> nullParams(config.numColumns, NullParam::kNoNulls);
+      auto rowVectors = makeVectors(1, size, columnTypes, nullParams);
+
+      // Update the values to be continuous from startingValue for first column
+      // Other columns follow the makeVectors pattern (with repeat counts)
+      auto vector = rowVectors[0];
+      auto firstColumn = vector->childAt(0)->as<FlatVector<int64_t>>();
+      for (int64_t i = 0; i < size; ++i) {
+        firstColumn->set(i, startingValue + i);
+      }
+
+      dataVectors.push_back(vector);
+      startingValue += size;
+    }
+
+    // Choose appropriate writeToFile method based on configuration
+    if (config.useConfigAndFlushPolicy) {
+      writeToFile(
+          dataFilePaths[dataFile.first]->getPath(),
+          dataVectors,
+          config_,
+          flushPolicyFactory_);
+    } else {
+      // For simple cases, write all vectors for this file
+      if (dataVectors.size() == 1) {
+        writeToFile(dataFilePaths[dataFile.first]->getPath(), dataVectors[0]);
+      } else {
+        // Multiple row groups - use vector version but without config
+        writeToFile(dataFilePaths[dataFile.first]->getPath(), dataVectors);
+      }
+    }
+
+    dataVectorsJoined.insert(
+        dataVectorsJoined.end(), dataVectors.begin(), dataVectors.end());
+  }
+
+  createDuckDbTable(dataVectorsJoined);
+  return dataFilePaths;
+}
+
+std::string IcebergTestBase::makeTypePredicates(
+    const std::vector<RowVectorPtr>& deleteVectors,
+    const std::vector<int32_t>& equalityFieldIds,
+    const std::vector<TypeKind>& columnTypes) {
+  VELOX_CHECK_EQ(deleteVectors.size(), 1);
+  VELOX_CHECK_EQ(equalityFieldIds.size(), columnTypes.size());
+
+  if (deleteVectors.empty() || deleteVectors[0]->size() == 0) {
+    return "";
+  }
+
+  auto deleteRowVector = deleteVectors[0];
+  int32_t numDeletedRows = deleteRowVector->size();
+
+  if (equalityFieldIds.size() == 1) {
+    // Single column delete - use NOT IN approach like original code
+    auto deleteVector = deleteRowVector->childAt(0);
+    auto fieldId = equalityFieldIds[0];
+    auto columnType = columnTypes[0];
+    std::string columnName = fmt::format("c{}", fieldId - 1);
+
+    // Extract delete values based on type
+    switch (columnType) {
+      case TypeKind::TINYINT: {
+        auto vector = deleteVector->as<FlatVector<int8_t>>();
+        std::vector<int8_t> deleteValues;
+        for (int row = 0; row < numDeletedRows; ++row) {
+          if (!vector->isNullAt(row)) {
+            deleteValues.push_back(vector->valueAt(row));
+          }
+        }
+        if (deleteValues.empty()) {
+          return "";
+        }
+        return fmt::format(
+            "({} IS NULL OR {} NOT IN ({}))",
+            columnName,
+            columnName,
+            makeNotInList<TypeKind::TINYINT>(deleteValues));
+      }
+      case TypeKind::SMALLINT: {
+        auto vector = deleteVector->as<FlatVector<int16_t>>();
+        std::vector<int16_t> deleteValues;
+        for (int row = 0; row < numDeletedRows; ++row) {
+          if (!vector->isNullAt(row)) {
+            deleteValues.push_back(vector->valueAt(row));
+          }
+        }
+        if (deleteValues.empty()) {
+          return "";
+        }
+        return fmt::format(
+            "({} IS NULL OR {} NOT IN ({}))",
+            columnName,
+            columnName,
+            makeNotInList<TypeKind::SMALLINT>(deleteValues));
+      }
+      case TypeKind::INTEGER: {
+        auto vector = deleteVector->as<FlatVector<int32_t>>();
+        std::vector<int32_t> deleteValues;
+        for (int row = 0; row < numDeletedRows; ++row) {
+          if (!vector->isNullAt(row)) {
+            deleteValues.push_back(vector->valueAt(row));
+          }
+        }
+        if (deleteValues.empty()) {
+          return "";
+        }
+        return fmt::format(
+            "({} IS NULL OR {} NOT IN ({}))",
+            columnName,
+            columnName,
+            makeNotInList<TypeKind::INTEGER>(deleteValues));
+      }
+      case TypeKind::BIGINT: {
+        auto vector = deleteVector->as<FlatVector<int64_t>>();
+        std::vector<int64_t> deleteValues;
+        for (int row = 0; row < numDeletedRows; ++row) {
+          if (!vector->isNullAt(row)) {
+            deleteValues.push_back(vector->valueAt(row));
+          }
+        }
+        if (deleteValues.empty()) {
+          return "";
+        }
+        return fmt::format(
+            "({} IS NULL OR {} NOT IN ({}))",
+            columnName,
+            columnName,
+            makeNotInList<TypeKind::BIGINT>(deleteValues));
+      }
+      case TypeKind::REAL: {
+        auto vector = deleteVector->as<FlatVector<float>>();
+        std::vector<float> deleteValues;
+        for (int row = 0; row < numDeletedRows; ++row) {
+          if (!vector->isNullAt(row)) {
+            deleteValues.push_back(vector->valueAt(row));
+          }
+        }
+        if (deleteValues.empty()) {
+          return "";
+        }
+        return fmt::format(
+            "({} IS NULL OR {} NOT IN ({}))",
+            columnName,
+            columnName,
+            makeNotInList<TypeKind::REAL>(deleteValues));
+      }
+      case TypeKind::DOUBLE: {
+        auto vector = deleteVector->as<FlatVector<double>>();
+        std::vector<double> deleteValues;
+        for (int row = 0; row < numDeletedRows; ++row) {
+          if (!vector->isNullAt(row)) {
+            deleteValues.push_back(vector->valueAt(row));
+          }
+        }
+        if (deleteValues.empty()) {
+          return "";
+        }
+        return fmt::format(
+            "({} IS NULL OR {} NOT IN ({}))",
+            columnName,
+            columnName,
+            makeNotInList<TypeKind::DOUBLE>(deleteValues));
+      }
+      case TypeKind::VARCHAR: {
+        auto vector = deleteVector->as<FlatVector<StringView>>();
+        std::vector<StringView> deleteValues;
+        for (int row = 0; row < numDeletedRows; ++row) {
+          if (!vector->isNullAt(row)) {
+            deleteValues.push_back(vector->valueAt(row));
+          }
+        }
+        if (deleteValues.empty()) {
+          return "";
+        }
+        return fmt::format(
+            "({} IS NULL OR {} NOT IN ({}))",
+            columnName,
+            columnName,
+            makeNotInList<TypeKind::VARCHAR>(deleteValues));
+      }
+      case TypeKind::VARBINARY: {
+        auto vector = deleteVector->as<FlatVector<StringView>>();
+        std::vector<StringView> deleteValues;
+        for (int row = 0; row < numDeletedRows; ++row) {
+          if (!vector->isNullAt(row)) {
+            deleteValues.push_back(vector->valueAt(row));
+          }
+        }
+        if (deleteValues.empty()) {
+          return "";
+        }
+        return fmt::format(
+            "({} IS NULL OR {} NOT IN ({}))",
+            columnName,
+            columnName,
+            makeNotInList<TypeKind::VARBINARY>(deleteValues));
+      }
+      default:
+        VELOX_FAIL(
+            "Unsupported type for predicate: {}",
+            mapTypeKindToName(columnType));
+    }
+  } else {
+    // Multi-column delete - use row-by-row OR logic like original code
+    std::string predicates;
+    for (int32_t row = 0; row < numDeletedRows; ++row) {
+      std::string oneRow;
+      for (size_t i = 0; i < equalityFieldIds.size(); ++i) {
+        auto deleteVector = deleteRowVector->childAt(i);
+        auto fieldId = equalityFieldIds[i];
+        auto columnType = columnTypes[i];
+        std::string columnName = fmt::format("c{}", fieldId - 1);
+
+        std::string predicate;
+        if (deleteVector->isNullAt(row)) {
+          predicate = fmt::format("({} IS NOT NULL)", columnName);
+        } else {
+          std::string valueStr;
+          switch (columnType) {
+            case TypeKind::TINYINT: {
+              auto vector = deleteVector->as<FlatVector<int8_t>>();
+              valueStr = std::to_string(vector->valueAt(row));
+              predicate = fmt::format("({} <> {})", columnName, valueStr);
+              break;
+            }
+            case TypeKind::SMALLINT: {
+              auto vector = deleteVector->as<FlatVector<int16_t>>();
+              valueStr = std::to_string(vector->valueAt(row));
+              predicate = fmt::format("({} <> {})", columnName, valueStr);
+              break;
+            }
+            case TypeKind::INTEGER: {
+              auto vector = deleteVector->as<FlatVector<int32_t>>();
+              valueStr = std::to_string(vector->valueAt(row));
+              predicate = fmt::format("({} <> {})", columnName, valueStr);
+              break;
+            }
+            case TypeKind::BIGINT: {
+              auto vector = deleteVector->as<FlatVector<int64_t>>();
+              valueStr = std::to_string(vector->valueAt(row));
+              predicate = fmt::format("({} <> {})", columnName, valueStr);
+              break;
+            }
+            case TypeKind::VARCHAR:
+            case TypeKind::VARBINARY: {
+              auto vector = deleteVector->as<FlatVector<StringView>>();
+              valueStr = vector->valueAt(row).str();
+              predicate = fmt::format("({} <> '{}')", columnName, valueStr);
+              break;
+            }
+            default:
+              VELOX_FAIL(
+                  "Unsupported type for predicate: {}",
+                  mapTypeKindToName(columnType));
+          }
+        }
+
+        oneRow = oneRow.empty() ? predicate
+                                : fmt::format("({} OR {})", oneRow, predicate);
+      }
+
+      predicates = predicates.empty()
+          ? oneRow
+          : fmt::format("{} AND {}", predicates, oneRow);
+    }
+    return predicates;
+  }
+}
+
 std::vector<std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataFiles(
     uint64_t numRows,
     int32_t numColumns,
     int32_t splitCount,
     std::vector<RowVectorPtr> dataVectors) {
-  if (dataVectors.empty()) {
-    std::vector<TypeKind> columnTypes(numColumns, TypeKind::BIGINT);
-    std::vector<NullParam> nullParams(numColumns, NullParam::kNoNulls);
-    dataVectors = makeVectors(splitCount, numRows, columnTypes, nullParams);
-  }
-  VELOX_CHECK_EQ(dataVectors.size(), splitCount);
+  WriteDataFilesConfig config;
+  config.numRows = numRows;
+  config.numColumns = numColumns;
+  config.splitCount = splitCount;
+  config.dataVectors = std::move(dataVectors);
+  config.useConfigAndFlushPolicy = false;  // Equality deletes use simple writeToFile
+  
+  auto namedFilePaths = writeDataFiles(config);
+  
+  // Convert to vector in order for backward compatibility
   std::vector<std::shared_ptr<TempFilePath>> dataFilePaths;
   dataFilePaths.reserve(splitCount);
-  for (auto i = 0; i < splitCount; i++) {
-    dataFilePaths.emplace_back(TempFilePath::create());
-    writeToFile(dataFilePaths.back()->getPath(), dataVectors[i]);
+  for (int i = 0; i < splitCount; i++) {
+    std::string fileName = fmt::format("data_file_{}", i);
+    dataFilePaths.push_back(namedFilePaths[fileName]);
   }
-  createDuckDbTable(dataVectors);
+  
   return dataFilePaths;
 }
 
 std::map<std::string, std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataFiles(
     const std::map<std::string, std::vector<int64_t>>& rowGroupSizesForFiles) {
-  std::map<std::string, std::shared_ptr<TempFilePath>> dataFilePaths;
-  std::vector<RowVectorPtr> dataVectorsJoined;
-  dataVectorsJoined.reserve(rowGroupSizesForFiles.size());
-  int64_t startingValue = 0;
-  for (const auto& dataFile : rowGroupSizesForFiles) {
-    dataFilePaths[dataFile.first] = TempFilePath::create();
-    std::vector<RowVectorPtr> dataVectors;
-    dataVectors.reserve(dataFile.second.size());
-    for (int64_t size : dataFile.second) {
-      std::vector<int64_t> data;
-      data.reserve(size);
-      for (int64_t i = 0; i < size; ++i) {
-        data.push_back(startingValue + i);
-      }
-      VectorPtr c0 = makeFlatVector<int64_t>(data);
-      dataVectors.push_back(makeRowVector({"c0"}, {c0}));
-      startingValue += size;
-    }
-    writeToFile(
-        dataFilePaths[dataFile.first]->getPath(),
-        dataVectors,
-        config_,
-        flushPolicyFactory_);
-    dataVectorsJoined.insert(
-        dataVectorsJoined.end(), dataVectors.begin(), dataVectors.end());
-  }
-  createDuckDbTable(dataVectorsJoined);
-  return dataFilePaths;
+  WriteDataFilesConfig config;
+  config.rowGroupSizesForFiles = rowGroupSizesForFiles;
+  config.useConfigAndFlushPolicy = true;  // Positional deletes use config and flush policy
+  
+  return writeDataFiles(config);
 }
 
 // Explicit template instantiations for makeSequenceValues
@@ -459,29 +753,4 @@ template std::vector<int64_t> IcebergTestBase::makeSequenceValues<int64_t>(
 template std::vector<int128_t> IcebergTestBase::makeSequenceValues<int128_t>(
     int32_t,
     int8_t);
-
-// Explicit template instantiations for makeNotInList
-template std::string IcebergTestBase::makeNotInList<TypeKind::BOOLEAN>(
-    const std::vector<bool>&);
-template std::string IcebergTestBase::makeNotInList<TypeKind::TINYINT>(
-    const std::vector<int8_t>&);
-template std::string IcebergTestBase::makeNotInList<TypeKind::SMALLINT>(
-    const std::vector<int16_t>&);
-template std::string IcebergTestBase::makeNotInList<TypeKind::INTEGER>(
-    const std::vector<int32_t>&);
-template std::string IcebergTestBase::makeNotInList<TypeKind::BIGINT>(
-    const std::vector<int64_t>&);
-template std::string IcebergTestBase::makeNotInList<TypeKind::REAL>(
-    const std::vector<float>&);
-template std::string IcebergTestBase::makeNotInList<TypeKind::DOUBLE>(
-    const std::vector<double>&);
-template std::string IcebergTestBase::makeNotInList<TypeKind::VARCHAR>(
-    const std::vector<StringView>&);
-template std::string IcebergTestBase::makeNotInList<TypeKind::VARBINARY>(
-    const std::vector<StringView>&);
-template std::string IcebergTestBase::makeNotInList<TypeKind::TIMESTAMP>(
-    const std::vector<Timestamp>&);
-template std::string IcebergTestBase::makeNotInList<TypeKind::HUGEINT>(
-    const std::vector<int128_t>&);
-
 } // namespace facebook::velox::connector::hive::iceberg
