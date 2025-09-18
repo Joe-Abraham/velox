@@ -413,21 +413,31 @@ std::map<std::string, std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataF
   std::map<std::string, std::shared_ptr<TempFilePath>> dataFilePaths;
   std::vector<RowVectorPtr> dataVectorsJoined;
   dataVectorsJoined.reserve(rowGroupSizesForFiles.size());
+  
   int64_t startingValue = 0;
   for (const auto& dataFile : rowGroupSizesForFiles) {
     dataFilePaths[dataFile.first] = TempFilePath::create();
     std::vector<RowVectorPtr> dataVectors;
     dataVectors.reserve(dataFile.second.size());
+    
+    // Use makeVectors to create data instead of manually creating vectors
     for (int64_t size : dataFile.second) {
-      std::vector<int64_t> data;
-      data.reserve(size);
+      // Create a single vector with continuous values starting from startingValue
+      std::vector<TypeKind> columnTypes = {TypeKind::BIGINT};
+      std::vector<NullParam> nullParams = {NullParam::kNoNulls};
+      auto rowVectors = makeVectors(1, size, columnTypes, nullParams);
+      
+      // Update the values to be continuous from startingValue
+      auto vector = rowVectors[0];
+      auto flatVector = vector->childAt(0)->as<FlatVector<int64_t>>();
       for (int64_t i = 0; i < size; ++i) {
-        data.push_back(startingValue + i);
+        flatVector->set(i, startingValue + i);
       }
-      VectorPtr c0 = makeFlatVector<int64_t>(data);
-      dataVectors.push_back(makeRowVector({"c0"}, {c0}));
+      
+      dataVectors.push_back(vector);
       startingValue += size;
     }
+    
     writeToFile(
         dataFilePaths[dataFile.first]->getPath(),
         dataVectors,
