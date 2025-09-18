@@ -72,8 +72,12 @@ class IcebergTestBase : public HiveConnectorTestBase {
       int32_t splitCount = 1,
       std::vector<RowVectorPtr> dataVectors = {});
 
+  /// Write data files with specified row group structures for positional delete tests
+  /// @param rowGroupSizesForFiles Map of file names to vectors of row group sizes
+  /// @param numColumns Number of columns to generate (default: 1)
+  /// @return Map of file names to their corresponding file paths
   std::map<std::string, std::shared_ptr<TempFilePath>> writeDataFiles(
-      const std::map<std::string, std::vector<int64_t>>&
-          rowGroupSizesForFiles);
+      const std::map<std::string, std::vector<int64_t>>& rowGroupSizesForFiles,
+      int32_t numColumns = 1);
 };
 } // namespace facebook::velox::connector::hive::iceberg

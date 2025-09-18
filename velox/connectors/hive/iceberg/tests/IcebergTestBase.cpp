@@ -392,24 +392,43 @@ std::vector<std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataFiles(
     int32_t numColumns,
     int32_t splitCount,
     std::vector<RowVectorPtr> dataVectors) {
-  if (dataVectors.empty()) {
-    std::vector<TypeKind> columnTypes(numColumns, TypeKind::BIGINT);
-    std::vector<NullParam> nullParams(numColumns, NullParam::kNoNulls);
-    dataVectors = makeVectors(splitCount, numRows, columnTypes, nullParams);
+  if (!dataVectors.empty()) {
+    // If dataVectors are provided, use the original simple approach
+    VELOX_CHECK_EQ(dataVectors.size(), splitCount);
+    std::vector<std::shared_ptr<TempFilePath>> dataFilePaths;
+    dataFilePaths.reserve(splitCount);
+    for (auto i = 0; i < splitCount; i++) {
+      dataFilePaths.emplace_back(TempFilePath::create());
+      writeToFile(dataFilePaths.back()->getPath(), dataVectors[i]);
+    }
+    createDuckDbTable(dataVectors);
+    return dataFilePaths;
   }
-  VELOX_CHECK_EQ(dataVectors.size(), splitCount);
+  
+  // If no dataVectors provided, create a row group sizes map and delegate to the unified implementation
+  std::map<std::string, std::vector<int64_t>> rowGroupSizesForFiles;
+  for (int i = 0; i < splitCount; i++) {
+    std::string fileName = fmt::format("data_file_{}", i);
+    rowGroupSizesForFiles[fileName] = {static_cast<int64_t>(numRows)};
+  }
+  
+  // Use the unified row group implementation, but for multiple columns
+  auto namedFilePaths = writeDataFiles(rowGroupSizesForFiles, numColumns);
+  
+  // Extract just the file paths in order
   std::vector<std::shared_ptr<TempFilePath>> dataFilePaths;
   dataFilePaths.reserve(splitCount);
-  for (auto i = 0; i < splitCount; i++) {
-    dataFilePaths.emplace_back(TempFilePath::create());
-    writeToFile(dataFilePaths.back()->getPath(), dataVectors[i]);
+  for (int i = 0; i < splitCount; i++) {
+    std::string fileName = fmt::format("data_file_{}", i);
+    dataFilePaths.push_back(namedFilePaths[fileName]);
   }
-  createDuckDbTable(dataVectors);
+  
   return dataFilePaths;
 }
 
 std::map<std::string, std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataFiles(
-    const std::map<std::string, std::vector<int64_t>>& rowGroupSizesForFiles) {
+    const std::map<std::string, std::vector<int64_t>>& rowGroupSizesForFiles,
+    int32_t numColumns) {
   std::map<std::string, std::shared_ptr<TempFilePath>> dataFilePaths;
   std::vector<RowVectorPtr> dataVectorsJoined;
   dataVectorsJoined.reserve(rowGroupSizesForFiles.size());
@@ -422,16 +441,17 @@ std::map<std::string, std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataF
     
     // Use makeVectors to create data instead of manually creating vectors
     for (int64_t size : dataFile.second) {
-      // Create a single vector with continuous values starting from startingValue
-      std::vector<TypeKind> columnTypes = {TypeKind::BIGINT};
-      std::vector<NullParam> nullParams = {NullParam::kNoNulls};
+      // Create vectors with the specified number of columns, all BIGINT
+      std::vector<TypeKind> columnTypes(numColumns, TypeKind::BIGINT);
+      std::vector<NullParam> nullParams(numColumns, NullParam::kNoNulls);
       auto rowVectors = makeVectors(1, size, columnTypes, nullParams);
       
-      // Update the values to be continuous from startingValue
+      // Update the values to be continuous from startingValue for first column
+      // Other columns follow the makeVectors pattern (with repeat counts)
       auto vector = rowVectors[0];
-      auto flatVector = vector->childAt(0)->as<FlatVector<int64_t>>();
+      auto firstColumn = vector->childAt(0)->as<FlatVector<int64_t>>();
       for (int64_t i = 0; i < size; ++i) {
-        flatVector->set(i, startingValue + i);
+        firstColumn->set(i, startingValue + i);
       }
       
       dataVectors.push_back(vector);
