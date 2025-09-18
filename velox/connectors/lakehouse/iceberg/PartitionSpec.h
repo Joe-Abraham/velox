@@ -19,6 +19,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "velox/common/serialization/Serializable.h"
 
 namespace facebook::velox::connector::lakehouse::iceberg {
 
@@ -32,8 +33,8 @@ enum class TransformType {
   kTruncate
 };
 
-struct IcebergPartitionSpec {
-  struct Field {
+struct IcebergPartitionSpec : public ISerializable {
+  struct Field : public ISerializable {
     // The column name and type of this partition field as it appears in the
     // partition spec. The column can be a nested column in struct field.
     std::string name;
@@ -51,6 +52,14 @@ struct IcebergPartitionSpec {
         TransformType _transform,
         std::optional<int32_t> _parameter)
         : name(_name), transformType(_transform), parameter(_parameter) {}
+
+    folly::dynamic serialize() const override;
+
+    static std::shared_ptr<const ISerializable> create(
+        const folly::dynamic& obj,
+        void* context);
+
+    static void registerSerDe();
   };
 
   const int32_t specId;
@@ -58,6 +67,14 @@ struct IcebergPartitionSpec {
 
   IcebergPartitionSpec(int32_t _specId, const std::vector<Field>& _fields)
       : specId(_specId), fields(_fields) {}
+
+  folly::dynamic serialize() const override;
+
+  static std::shared_ptr<const ISerializable> create(
+      const folly::dynamic& obj,
+      void* context);
+
+  static void registerSerDe();
 };
 
 } // namespace facebook::velox::connector::lakehouse::iceberg
