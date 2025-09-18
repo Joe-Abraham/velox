@@ -475,33 +475,13 @@ class IcebergReadEqualityDeleteTest
     ASSERT_TRUE(it->second.peakMemoryBytes > 0);
   }
 
-  /// Creates data files for Iceberg testing with simple row/column
-  /// specifications.
-  ///
-  /// This function generates test data files with the specified data type and
-  /// structure. It creates columnar data with predictable patterns for testing
-  /// purposes.
-  ///
-  /// @tparam KIND The data type for columns (default: BIGINT)
-  /// @param numRows Total number of rows per split/file
-  /// @param numColumns Number of columns in each file (default: 1)
-  /// @param splitCount Number of separate files to create (default: 1)
-  /// @param dataVectors Pre-created data vectors; if empty, generates new ones
-  /// @return Vector of file paths to the created data files
-  ///
-  /// @note Generated data follows patterns:
-  ///   - First column (c0): continuously increasing values [0, 1, 2, ...]
-  ///   - Second column (c1): values repeat once [0, 0, 1, 1, 2, 2, ...]
-  ///   - Third column (c2): values repeat twice [0, 0, 0, 0, 1, 1, 1, 1, ...]
-  ///   - And so on for additional columns
-  template <TypeKind KIND = TypeKind::BIGINT>
   std::vector<std::shared_ptr<TempFilePath>> writeDataFiles(
       uint64_t numRows,
       int32_t numColumns = 1,
       int32_t splitCount = 1,
       std::vector<RowVectorPtr> dataVectors = {}) {
     if (dataVectors.empty()) {
-      std::vector<TypeKind> columnTypes(numColumns, KIND);
+      std::vector<TypeKind> columnTypes(numColumns, TypeKind::BIGINT);
       std::vector<NullParam> nullParams(numColumns, NullParam::kNoNulls);
       dataVectors = makeVectors(splitCount, numRows, columnTypes, nullParams);
     }
@@ -543,8 +523,7 @@ class IcebergReadEqualityDeleteTest
               makeFlatVector<int64_t>(
                   20, [](auto row) { return row + 1; })})})};
     int32_t numDataColumns = 1;
-    dataFilePath = writeDataFiles<TypeKind::BIGINT>(
-        rowCount_, numDataColumns, 1, dataVectors)[0];
+    dataFilePath = writeDataFiles(rowCount_, numDataColumns, 1, dataVectors)[0];
 
     // Write the delete file. Equality delete field is c_row.c1
     std::vector<IcebergDeleteFile> deleteFiles;
