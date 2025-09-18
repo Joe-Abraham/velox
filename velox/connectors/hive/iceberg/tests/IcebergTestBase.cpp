@@ -387,54 +387,39 @@ std::vector<RowVectorPtr> IcebergTestBase::makeVectors(
   return rowVectors;
 }
 
-std::vector<std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataFiles(
-    uint64_t numRows,
-    int32_t numColumns,
-    int32_t splitCount,
-    std::vector<RowVectorPtr> dataVectors) {
-  if (!dataVectors.empty()) {
-    // If dataVectors are provided, use the original simple approach
-    VELOX_CHECK_EQ(dataVectors.size(), splitCount);
-    std::vector<std::shared_ptr<TempFilePath>> dataFilePaths;
-    dataFilePaths.reserve(splitCount);
-    for (auto i = 0; i < splitCount; i++) {
-      dataFilePaths.emplace_back(TempFilePath::create());
-      writeToFile(dataFilePaths.back()->getPath(), dataVectors[i]);
+std::map<std::string, std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataFiles(
+    const WriteDataFilesConfig& config) {
+  std::map<std::string, std::shared_ptr<TempFilePath>> dataFilePaths;
+  std::vector<RowVectorPtr> dataVectorsJoined;
+  
+  // Handle custom dataVectors case first
+  if (!config.dataVectors.empty()) {
+    for (int i = 0; i < config.dataVectors.size(); i++) {
+      std::string fileName = fmt::format("data_file_{}", i);
+      dataFilePaths[fileName] = TempFilePath::create();
+      writeToFile(dataFilePaths[fileName]->getPath(), config.dataVectors[i]);
     }
-    createDuckDbTable(dataVectors);
+    createDuckDbTable(config.dataVectors);
     return dataFilePaths;
   }
   
-  // If no dataVectors provided, create a row group sizes map and delegate to the unified implementation
-  std::map<std::string, std::vector<int64_t>> rowGroupSizesForFiles;
-  for (int i = 0; i < splitCount; i++) {
-    std::string fileName = fmt::format("data_file_{}", i);
-    rowGroupSizesForFiles[fileName] = {static_cast<int64_t>(numRows)};
+  // Determine file structure - either from rowGroupSizesForFiles or generate simple structure
+  std::map<std::string, std::vector<int64_t>> fileStructure;
+  if (config.rowGroupSizesForFiles.has_value()) {
+    fileStructure = config.rowGroupSizesForFiles.value();
+  } else {
+    // Generate simple uniform structure
+    for (int i = 0; i < config.splitCount; i++) {
+      std::string fileName = fmt::format("data_file_{}", i);
+      fileStructure[fileName] = {static_cast<int64_t>(config.numRows)};
+    }
   }
   
-  // Use the unified row group implementation, but for multiple columns
-  auto namedFilePaths = writeDataFiles(rowGroupSizesForFiles, numColumns);
-  
-  // Extract just the file paths in order
-  std::vector<std::shared_ptr<TempFilePath>> dataFilePaths;
-  dataFilePaths.reserve(splitCount);
-  for (int i = 0; i < splitCount; i++) {
-    std::string fileName = fmt::format("data_file_{}", i);
-    dataFilePaths.push_back(namedFilePaths[fileName]);
-  }
-  
-  return dataFilePaths;
-}
-
-std::map<std::string, std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataFiles(
-    const std::map<std::string, std::vector<int64_t>>& rowGroupSizesForFiles,
-    int32_t numColumns) {
-  std::map<std::string, std::shared_ptr<TempFilePath>> dataFilePaths;
-  std::vector<RowVectorPtr> dataVectorsJoined;
-  dataVectorsJoined.reserve(rowGroupSizesForFiles.size());
-  
+  // Create data files using unified approach
+  dataVectorsJoined.reserve(fileStructure.size());
   int64_t startingValue = 0;
-  for (const auto& dataFile : rowGroupSizesForFiles) {
+  
+  for (const auto& dataFile : fileStructure) {
     dataFilePaths[dataFile.first] = TempFilePath::create();
     std::vector<RowVectorPtr> dataVectors;
     dataVectors.reserve(dataFile.second.size());
@@ -442,8 +427,8 @@ std::map<std::string, std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataF
     // Use makeVectors to create data instead of manually creating vectors
     for (int64_t size : dataFile.second) {
       // Create vectors with the specified number of columns, all BIGINT
-      std::vector<TypeKind> columnTypes(numColumns, TypeKind::BIGINT);
-      std::vector<NullParam> nullParams(numColumns, NullParam::kNoNulls);
+      std::vector<TypeKind> columnTypes(config.numColumns, TypeKind::BIGINT);
+      std::vector<NullParam> nullParams(config.numColumns, NullParam::kNoNulls);
       auto rowVectors = makeVectors(1, size, columnTypes, nullParams);
       
       // Update the values to be continuous from startingValue for first column
@@ -458,16 +443,65 @@ std::map<std::string, std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataF
       startingValue += size;
     }
     
-    writeToFile(
-        dataFilePaths[dataFile.first]->getPath(),
-        dataVectors,
-        config_,
-        flushPolicyFactory_);
+    // Choose appropriate writeToFile method based on configuration
+    if (config.useConfigAndFlushPolicy) {
+      writeToFile(
+          dataFilePaths[dataFile.first]->getPath(),
+          dataVectors,
+          config_,
+          flushPolicyFactory_);
+    } else {
+      // For simple cases, write all vectors for this file 
+      if (dataVectors.size() == 1) {
+        writeToFile(dataFilePaths[dataFile.first]->getPath(), dataVectors[0]);
+      } else {
+        // Multiple row groups - use vector version but without config
+        writeToFile(dataFilePaths[dataFile.first]->getPath(), dataVectors);
+      }
+    }
+    
     dataVectorsJoined.insert(
         dataVectorsJoined.end(), dataVectors.begin(), dataVectors.end());
   }
+  
   createDuckDbTable(dataVectorsJoined);
   return dataFilePaths;
+}
+
+std::vector<std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataFiles(
+    uint64_t numRows,
+    int32_t numColumns,
+    int32_t splitCount,
+    std::vector<RowVectorPtr> dataVectors) {
+  WriteDataFilesConfig config;
+  config.numRows = numRows;
+  config.numColumns = numColumns;
+  config.splitCount = splitCount;
+  config.dataVectors = std::move(dataVectors);
+  config.useConfigAndFlushPolicy = false;  // Equality deletes use simple writeToFile
+  
+  auto namedFilePaths = writeDataFiles(config);
+  
+  // Convert to vector in order for backward compatibility
+  std::vector<std::shared_ptr<TempFilePath>> dataFilePaths;
+  dataFilePaths.reserve(splitCount);
+  for (int i = 0; i < splitCount; i++) {
+    std::string fileName = fmt::format("data_file_{}", i);
+    dataFilePaths.push_back(namedFilePaths[fileName]);
+  }
+  
+  return dataFilePaths;
+}
+
+std::map<std::string, std::shared_ptr<TempFilePath>> IcebergTestBase::writeDataFiles(
+    const std::map<std::string, std::vector<int64_t>>& rowGroupSizesForFiles,
+    int32_t numColumns) {
+  WriteDataFilesConfig config;
+  config.numColumns = numColumns;
+  config.rowGroupSizesForFiles = rowGroupSizesForFiles;
+  config.useConfigAndFlushPolicy = true;  // Positional deletes use config and flush policy
+  
+  return writeDataFiles(config);
 }
 
 // Explicit template instantiations for makeSequenceValues
