@@ -58,17 +58,8 @@ class IcebergTestBase : public HiveConnectorTestBase {
           partitionKeys = {},
       const uint32_t splitCount = 1);
 
-  /// Generate test data vectors with configurable null patterns
-  template <TypeKind KIND>
-  std::vector<RowVectorPtr> makeVectorsImpl(
-      int32_t count,
-      int32_t rowsPerVector,
-      int32_t numColumns = 1,
-      std::vector<NullParam> nullParam = {NullParam::kNoNulls});
-
   /// Generate test data vectors with mixed column types and configurable null
-  /// patterns per column Uses the same logic as makeVectorsImpl but supports
-  /// different types for each column
+  /// patterns per column
   std::vector<RowVectorPtr> makeVectors(
       int32_t count,
       int32_t rowsPerVector,

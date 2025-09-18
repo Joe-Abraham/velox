@@ -501,7 +501,9 @@ class IcebergReadEqualityDeleteTest
       int32_t splitCount = 1,
       std::vector<RowVectorPtr> dataVectors = {}) {
     if (dataVectors.empty()) {
-      dataVectors = makeVectorsImpl<KIND>(splitCount, numRows, numColumns);
+      std::vector<TypeKind> columnTypes(numColumns, KIND);
+      std::vector<NullParam> nullParams(numColumns, NullParam::kNoNulls);
+      dataVectors = makeVectors(splitCount, numRows, columnTypes, nullParams);
     }
     VELOX_CHECK_EQ(dataVectors.size(), splitCount);
 
