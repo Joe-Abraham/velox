@@ -46,6 +46,7 @@ if(VELOX_BUILD_TESTING AND (NOT VELOX_DISABLE_GOOGLETEST))
     IcebergSplitReaderBenchmarkTest.cpp
     IcebergTableHandleTest.cpp
     IcebergTestBase.cpp
+    PartitionSpecTest.cpp
     Main.cpp)
   add_test(velox_lakehouse_iceberg_test velox_lakehouse_iceberg_test)
 

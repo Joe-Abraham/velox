@@ -82,11 +82,12 @@ TEST_F(PartitionSpecTest, fieldSerializeRoundTrip) {
   EXPECT_EQ(serialized["transformType"].asString(), "bucket");
   EXPECT_EQ(serialized["parameter"].asInt(), 10);
 
-  auto deserialized = IcebergPartitionSpec::Field::create(serialized, pool());
-  EXPECT_EQ(deserialized->name, "bucket_column");
-  EXPECT_EQ(deserialized->transformType, TransformType::kBucket);
-  EXPECT_TRUE(deserialized->parameter.has_value());
-  EXPECT_EQ(deserialized->parameter.value(), 10);
+  auto deserialized = Field::create(serialized, pool());
+  auto field = std::static_pointer_cast<const IcebergPartitionSpec::Field>(deserialized);
+  EXPECT_EQ(field->name, "bucket_column");
+  EXPECT_EQ(field->transformType, TransformType::kBucket);
+  EXPECT_TRUE(field->parameter.has_value());
+  EXPECT_EQ(field->parameter.value(), 10);
 
   // Test Field without parameter
   IcebergPartitionSpec::Field fieldWithoutParam("identity_column", TransformType::kIdentity, std::nullopt);
@@ -97,10 +98,11 @@ TEST_F(PartitionSpecTest, fieldSerializeRoundTrip) {
   EXPECT_EQ(serialized2["transformType"].asString(), "identity");
   EXPECT_TRUE(serialized2["parameter"].isNull());
 
-  auto deserialized2 = IcebergPartitionSpec::Field::create(serialized2, pool());
-  EXPECT_EQ(deserialized2->name, "identity_column");
-  EXPECT_EQ(deserialized2->transformType, TransformType::kIdentity);
-  EXPECT_FALSE(deserialized2->parameter.has_value());
+  auto deserialized2 = Field::create(serialized2, pool());
+  auto field2 = std::static_pointer_cast<const IcebergPartitionSpec::Field>(deserialized2);
+  EXPECT_EQ(field2->name, "identity_column");
+  EXPECT_EQ(field2->transformType, TransformType::kIdentity);
+  EXPECT_FALSE(field2->parameter.has_value());
 }
 
 TEST_F(PartitionSpecTest, partitionSpecSerializeRoundTrip) {
@@ -140,11 +142,12 @@ TEST_F(PartitionSpecTest, partitionSpecSerializeRoundTrip) {
 
   // Deserialize
   auto deserialized = IcebergPartitionSpec::create(serialized, pool());
-  EXPECT_EQ(deserialized->specId, 42);
-  EXPECT_EQ(deserialized->fields.size(), 4);
+  auto spec = std::static_pointer_cast<const IcebergPartitionSpec>(deserialized);
+  EXPECT_EQ(spec->specId, 42);
+  EXPECT_EQ(spec->fields.size(), 4);
 
   // Verify deserialized fields
-  const auto& deserializedFields = deserialized->fields;
+  const auto& deserializedFields = spec->fields;
   
   EXPECT_EQ(deserializedFields[0].name, "date_column");
   EXPECT_EQ(deserializedFields[0].transformType, TransformType::kDay);
@@ -177,8 +180,9 @@ TEST_F(PartitionSpecTest, emptyPartitionSpec) {
   EXPECT_EQ(serialized["fields"].size(), 0);
 
   auto deserialized = IcebergPartitionSpec::create(serialized, pool());
-  EXPECT_EQ(deserialized->specId, 0);
-  EXPECT_EQ(deserialized->fields.size(), 0);
+  auto spec = std::static_pointer_cast<const IcebergPartitionSpec>(deserialized);
+  EXPECT_EQ(spec->specId, 0);
+  EXPECT_EQ(spec->fields.size(), 0);
 }
 
 TEST_F(PartitionSpecTest, serializationErrors) {

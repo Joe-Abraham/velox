@@ -106,7 +106,7 @@ struct IcebergPartitionSpec : public ISerializable {
       return obj;
     }
 
-    static std::shared_ptr<Field> create(const folly::dynamic& obj, void* context) {
+    static std::shared_ptr<const ISerializable> create(const folly::dynamic& obj, void* context) {
       VELOX_CHECK(obj.isObject(), "Field::create expects object");
       
       const auto* fieldNamePtr = obj.get_ptr("fieldName");
@@ -126,7 +126,7 @@ struct IcebergPartitionSpec : public ISerializable {
         parameter = static_cast<int32_t>(parameterPtr->asInt());
       }
 
-      return std::make_shared<Field>(fieldName, transformType, parameter);
+      return std::make_shared<const Field>(fieldName, transformType, parameter);
     }
 
     static void registerSerDe() {
@@ -155,7 +155,7 @@ struct IcebergPartitionSpec : public ISerializable {
     return obj;
   }
 
-  static std::shared_ptr<IcebergPartitionSpec> create(const folly::dynamic& obj, void* context) {
+  static std::shared_ptr<const ISerializable> create(const folly::dynamic& obj, void* context) {
     VELOX_CHECK(obj.isObject(), "IcebergPartitionSpec::create expects object");
     
     const auto* specIdPtr = obj.get_ptr("specId");
@@ -170,11 +170,12 @@ struct IcebergPartitionSpec : public ISerializable {
     std::vector<Field> deserializedFields;
     deserializedFields.reserve(fieldsPtr->size());
     for (const auto& fieldObj : *fieldsPtr) {
-      auto field = Field::create(fieldObj, context);
+      auto fieldPtr = Field::create(fieldObj, context);
+      auto field = std::static_pointer_cast<const Field>(fieldPtr);
       deserializedFields.push_back(*field);
     }
 
-    return std::make_shared<IcebergPartitionSpec>(specId, std::move(deserializedFields));
+    return std::make_shared<const IcebergPartitionSpec>(specId, std::move(deserializedFields));
   }
 
   static void registerSerDe() {
