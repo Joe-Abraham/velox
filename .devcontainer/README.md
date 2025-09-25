@@ -104,10 +104,18 @@ To add more development tools, modify the `Dockerfile` and rebuild:
 
 ```bash
 cd .devcontainer
-docker-compose build --no-cache
+docker compose build --no-cache
 ```
 
 ## Troubleshooting
+
+### Docker Command Issues
+
+If you get "unknown shorthand flag" errors:
+
+1. **Use modern Docker Compose** - Use `docker compose` (with space) instead of `docker-compose` (with hyphen)
+2. **Check flag syntax** - Docker flags come before the subcommand: `docker compose -f file.yml up`
+3. **Verify Docker version** - Ensure you have Docker Compose v2 installed
 
 ### Container Build Issues
 
@@ -150,8 +158,8 @@ If builds are slow:
 
 For issues specific to the dev container setup, please check:
 
-1. **Docker logs** - `docker-compose logs velox-dev`
-2. **Container shell** - `docker-compose exec velox-dev bash`
+1. **Docker logs** - `docker compose logs velox-dev`
+2. **Container shell** - `docker compose exec velox-dev bash`
 3. **Build logs** - Check the CMake and build output in CLion
 
 For Velox-specific issues, refer to the main [Velox documentation](../README.md).
