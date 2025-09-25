@@ -265,3 +265,25 @@ you can override the `NUM_THREADS` environment variable by doing:
 ```shell
 $ docker-compose run -e NUM_THREADS=<NUM_THREADS_TO_USE> --rm ubuntu-cpp
 ```
+
+### Development with CLion and Dev Containers
+
+For developers using JetBrains CLion or other IDEs with dev container support,
+Velox provides a complete development container configuration in the `.devcontainer` directory.
+This provides a consistent development environment with all dependencies pre-installed.
+
+```shell
+$ cd .devcontainer
+$ ./setup.sh build    # Build the container (first time)
+$ ./setup.sh start    # Start the container
+# Now open CLion and attach to the running container
+```
+
+The dev container includes:
+- Complete Velox build environment based on Ubuntu 22.04
+- Development tools (GDB, Valgrind, etc.)
+- Optimized CMake configuration for debugging
+- ccache for fast incremental builds
+- Persistent volumes for build cache
+
+See [.devcontainer/README.md](.devcontainer/README.md) for detailed setup instructions.
