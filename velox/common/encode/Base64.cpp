@@ -166,7 +166,7 @@ std::string Base64::encodeImpl(
   size_t encodedSize = calculateEncodedSize(input.size(), includePadding);
   std::string encodedResult;
   encodedResult.resize(encodedSize);
-  encodeImpl(input, charset, includePadding, encodedResult.data());
+  encodeImpl(input, charset, includePadding, encodedResult);
   return encodedResult;
 }
 
@@ -186,15 +186,13 @@ size_t Base64::calculateEncodedSize(size_t inputSize, bool withPadding) {
 }
 
 // static
-void Base64::encode(const char* input, size_t inputSize, char* output) {
-  encodeImpl(
-      folly::StringPiece(input, inputSize), kBase64Charset, true, output);
+void Base64::encode(std::string_view input, std::string& output) {
+  encodeImpl(input, kBase64Charset, false, output);
 }
 
 // static
-void Base64::encodeUrl(const char* input, size_t inputSize, char* output) {
-  encodeImpl(
-      folly::StringPiece(input, inputSize), kBase64UrlCharset, true, output);
+void Base64::encodeUrl(std::string_view input, std::string& output) {
+  encodeImpl(input, kBase64UrlCharset, true, output);
 }
 
 // static
@@ -203,13 +201,16 @@ void Base64::encodeImpl(
     const T& input,
     const Charset& charset,
     bool includePadding,
-    char* outputBuffer) {
+    std::string& output) {
   auto inputSize = input.size();
+  output.clear();
   if (inputSize == 0) {
     return;
   }
 
-  auto outputPointer = outputBuffer;
+  size_t encodedSize = calculateEncodedSize(inputSize, includePadding);
+  output.reserve(encodedSize);
+
   auto inputIterator = input.begin();
 
   // For each group of 3 bytes (24 bits) in the input, split that into
@@ -219,10 +220,10 @@ void Base64::encodeImpl(
     inputBlock |= static_cast<uint8_t>(*inputIterator++) << 8;
     inputBlock |= static_cast<uint8_t>(*inputIterator++);
 
-    *outputPointer++ = charset[(inputBlock >> 18) & 0x3f];
-    *outputPointer++ = charset[(inputBlock >> 12) & 0x3f];
-    *outputPointer++ = charset[(inputBlock >> 6) & 0x3f];
-    *outputPointer++ = charset[inputBlock & 0x3f];
+    output.push_back(charset[(inputBlock >> 18) & 0x3F]);
+    output.push_back(charset[(inputBlock >> 12) & 0x3F]);
+    output.push_back(charset[(inputBlock >> 6) & 0x3F]);
+    output.push_back(charset[inputBlock & 0x3F]);
   }
 
   if (inputSize > 0) {
@@ -230,32 +231,28 @@ void Base64::encodeImpl(
     // above (assuming 0 for all other bytes).  Optionally append the '='
     // character if it is requested.
     uint32_t inputBlock = static_cast<uint8_t>(*inputIterator++) << 16;
-    *outputPointer++ = charset[(inputBlock >> 18) & 0x3f];
+    output.push_back(charset[(inputBlock >> 18) & 0x3F]);
+
     if (inputSize > 1) {
       inputBlock |= static_cast<uint8_t>(*inputIterator) << 8;
-      *outputPointer++ = charset[(inputBlock >> 12) & 0x3f];
-      *outputPointer++ = charset[(inputBlock >> 6) & 0x3f];
+      output.push_back(charset[(inputBlock >> 12) & 0x3F]);
+      output.push_back(charset[(inputBlock >> 6) & 0x3F]);
       if (includePadding) {
-        *outputPointer = kPadding;
+        output.push_back(kPadding);
       }
     } else {
-      *outputPointer++ = charset[(inputBlock >> 12) & 0x3f];
+      output.push_back(charset[(inputBlock >> 12) & 0x3F]);
       if (includePadding) {
-        *outputPointer++ = kPadding;
-        *outputPointer = kPadding;
+        output.push_back(kPadding);
+        output.push_back(kPadding);
       }
     }
   }
 }
 
 // static
-std::string Base64::encode(folly::StringPiece text) {
-  return encodeImpl(text, kBase64Charset, true);
-}
-
-// static
-std::string Base64::encode(const char* input, size_t inputSize) {
-  return encode(folly::StringPiece(input, inputSize));
+std::string Base64::encode(std::string_view input, bool includePadding) {
+  return encodeImpl(input, kBase64Charset, includePadding);
 }
 
 namespace {
@@ -492,13 +489,8 @@ Expected<size_t> Base64::decodeImpl(
 }
 
 // static
-std::string Base64::encodeUrl(folly::StringPiece text) {
-  return encodeImpl(text, kBase64UrlCharset, false);
-}
-
-// static
-std::string Base64::encodeUrl(const char* input, size_t inputSize) {
-  return encodeUrl(folly::StringPiece(input, inputSize));
+std::string Base64::encodeUrl(std::string_view input, bool includePadding) {
+  return encodeImpl(input, kBase64UrlCharset, includePadding);
 }
 
 // static
