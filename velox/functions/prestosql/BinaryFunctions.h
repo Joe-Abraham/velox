@@ -299,15 +299,13 @@ struct FromBase64Function {
   // same, but hard-coding one of them might be confusing.
   template <typename T>
   FOLLY_ALWAYS_INLINE Status call(out_type<Varbinary>& result, const T& input) {
-    auto inputSize = input.size();
-    auto decodedSize =
-        encoding::Base64::calculateDecodedSize(input.data(), inputSize);
-    if (decodedSize.hasError()) {
-      return decodedSize.error();
+    std::string decodedStr;
+    auto status = encoding::Base64::decode(
+        std::string_view(input.data(), input.size()), decodedStr);
+    if (status.ok()) {
+      result.setNoCopy(StringView(decodedStr));
     }
-    result.resize(decodedSize.value());
-    return encoding::Base64::decode(
-        input.data(), inputSize, result.data(), result.size());
+    return status;
   }
 };
 
@@ -316,15 +314,13 @@ struct FromBase64UrlFunction {
   VELOX_DEFINE_FUNCTION_TYPES(T);
   FOLLY_ALWAYS_INLINE Status
   call(out_type<Varbinary>& result, const arg_type<Varchar>& input) {
-    auto inputSize = input.size();
-    auto decodedSize =
-        encoding::Base64::calculateDecodedSize(input.data(), inputSize);
-    if (decodedSize.hasError()) {
-      return decodedSize.error();
+    std::string decodedStr;
+    auto status = encoding::Base64::decodeUrl(
+        std::string_view(input.data(), input.size()), decodedStr);
+    if (status.ok()) {
+      result.setNoCopy(StringView(decodedStr));
     }
-    result.resize(decodedSize.value());
-    return encoding::Base64::decodeUrl(
-        input.data(), inputSize, result.data(), result.size());
+    return status;
   }
 };
 
