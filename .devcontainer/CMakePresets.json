@@ -1,0 +1,76 @@
+{
+    "version": 3,
+    "configurePresets": [
+        {
+            "name": "dev-container-debug",
+            "displayName": "Dev Container Debug",
+            "description": "Debug configuration for dev container environment",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/_build/debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "VELOX_BUILD_TESTING": "ON",
+                "VELOX_ENABLE_DUCKDB": "ON",
+                "VELOX_ENABLE_PARQUET": "ON",
+                "VELOX_BUILD_SHARED": "OFF",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+                "CMAKE_CXX_COMPILER_LAUNCHER": "ccache"
+            },
+            "environment": {
+                "CC": "gcc-11",
+                "CXX": "g++-11",
+                "CCACHE_DIR": "/velox/.ccache"
+            }
+        },
+        {
+            "name": "dev-container-release",
+            "displayName": "Dev Container Release",
+            "description": "Release configuration for dev container environment",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/_build/release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "VELOX_BUILD_TESTING": "ON",
+                "VELOX_ENABLE_DUCKDB": "ON",
+                "VELOX_ENABLE_PARQUET": "ON",
+                "VELOX_BUILD_SHARED": "OFF",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+                "CMAKE_C_COMPILER_LAUNCHER": "ccache",
+                "CMAKE_CXX_COMPILER_LAUNCHER": "ccache"
+            },
+            "environment": {
+                "CC": "gcc-11",
+                "CXX": "g++-11",
+                "CCACHE_DIR": "/velox/.ccache"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "dev-container-debug-build",
+            "displayName": "Dev Container Debug Build",
+            "configurePreset": "dev-container-debug",
+            "jobs": 8
+        },
+        {
+            "name": "dev-container-release-build", 
+            "displayName": "Dev Container Release Build",
+            "configurePreset": "dev-container-release",
+            "jobs": 8
+        }
+    ],
+    "testPresets": [
+        {
+            "name": "dev-container-debug-test",
+            "displayName": "Dev Container Debug Tests",
+            "configurePreset": "dev-container-debug",
+            "output": {
+                "outputOnFailure": true
+            },
+            "execution": {
+                "jobs": 8
+            }
+        }
+    ]
+}

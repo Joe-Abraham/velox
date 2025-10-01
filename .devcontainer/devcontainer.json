@@ -1,0 +1,67 @@
+{
+	"name": "Velox Development Container",
+	"dockerComposeFile": ["docker-compose.yml"],
+	"service": "velox-dev",
+	"workspaceFolder": "/velox",
+	"shutdownAction": "stopCompose",
+
+	// Configure tool-specific properties.
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"cmake.configureSettings": {
+					"CMAKE_BUILD_TYPE": "Debug",
+					"VELOX_BUILD_TESTING": "ON",
+					"VELOX_ENABLE_DUCKDB": "ON",
+					"VELOX_ENABLE_PARQUET": "ON"
+				},
+				"cmake.buildDirectory": "${workspaceFolder}/_build/debug",
+				"cmake.generator": "Ninja",
+				"cmake.parallelJobs": 8,
+				"C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+				"C_Cpp.default.cppStandard": "c++20",
+				"files.associations": {
+					"*.h": "cpp",
+					"*.hpp": "cpp"
+				}
+			},
+			"extensions": [
+				"ms-vscode.cpptools",
+				"ms-vscode.cmake-tools",
+				"ms-vscode.cpptools-extension-pack",
+				"twxs.cmake"
+			]
+		}
+	},
+
+	// Features to add to the dev container. More info: https://containers.dev/features.
+	"features": {
+		"ghcr.io/devcontainers/features/git:1": {
+			"ppa": true,
+			"version": "latest"
+		}
+	},
+
+	// Use 'forwardPorts' to make a list of ports inside the container available locally.
+	"forwardPorts": [],
+
+	// Use 'postCreateCommand' to run commands after the container is created.
+	"postCreateCommand": "echo 'Dev container ready for Velox development!'",
+
+	// Configure container user
+	"remoteUser": "root",
+	"containerUser": "root",
+
+	// Mount additional volumes for better performance and persistence
+	"mounts": [
+		"source=${localWorkspaceFolder}/.ccache,target=/velox/.ccache,type=bind,consistency=cached",
+		"source=velox-cmake-cache,target=/velox/_build,type=volume"
+	],
+
+	// Environment variables
+	"containerEnv": {
+		"CCACHE_DIR": "/velox/.ccache",
+		"NUM_THREADS": "8",
+		"VELOX_DEPENDENCY_SOURCE": "BUNDLED"
+	}
+}
