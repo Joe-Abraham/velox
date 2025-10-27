@@ -1,0 +1,5 @@
+# Local development files
+.ccache/
+_build/
+*.log
+.DS_Store
