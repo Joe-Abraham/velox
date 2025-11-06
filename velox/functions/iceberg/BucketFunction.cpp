@@ -27,7 +27,7 @@ getBucketIndex(int32_t numBuckets, int32_t hashedValue) {
   return (hashedValue & std::numeric_limits<int32_t>::max()) % numBuckets;
 }
 
-// bucket(numBuckets, decimal) -> bucketIndex
+// bucket(decimal, numBuckets) -> bucketIndex
 // Hash the minimal bytes of the decimal unscaled value, then MOD numBuckets to
 // get the bucket index.
 template <typename TExec>
@@ -35,7 +35,7 @@ struct BucketDecimalFunction {
   VELOX_DEFINE_FUNCTION_TYPES(TExec);
 
   template <typename T>
-  FOLLY_ALWAYS_INLINE Status call(int32_t& out, int32_t numBuckets, T input) {
+  FOLLY_ALWAYS_INLINE Status call(int32_t& out, T input, int32_t numBuckets) {
     VELOX_USER_RETURN_LE(numBuckets, 0, "Invalid number of buckets.");
     char bytes[sizeof(int128_t)];
     const auto length = DecimalUtil::toByteArray(input, bytes);
@@ -45,7 +45,7 @@ struct BucketDecimalFunction {
   }
 };
 
-// bucket(numBuckets, input) -> bucketIndex
+// bucket(input, numBuckets) -> bucketIndex
 // Bucket all other Iceberg supported types including the integral type,
 // varchar, varbinary, date and timestamp type.
 template <typename TExec>
@@ -55,7 +55,7 @@ struct BucketFunction {
   // Value of type INTEGER and BIGINT is treated as unsigned type.
   // For the schema evolution, may promote int to int64, treat int32 as uint64.
   template <typename T>
-  FOLLY_ALWAYS_INLINE Status call(int32_t& out, int32_t numBuckets, T input) {
+  FOLLY_ALWAYS_INLINE Status call(int32_t& out, T input, int32_t numBuckets) {
     VELOX_USER_RETURN_LE(numBuckets, 0, "Invalid number of buckets.");
     const auto hash = Murmur3Hash32::hashInt64(input);
     out = getBucketIndex(numBuckets, hash);
@@ -63,7 +63,7 @@ struct BucketFunction {
   }
 
   FOLLY_ALWAYS_INLINE Status
-  call(int32_t& out, int32_t numBuckets, const arg_type<Varchar>& input) {
+  call(int32_t& out, const arg_type<Varchar>& input, int32_t numBuckets) {
     VELOX_USER_RETURN_LE(numBuckets, 0, "Invalid number of buckets.");
     const auto hash = Murmur3Hash32::hashBytes(input.data(), input.size());
     out = getBucketIndex(numBuckets, hash);
@@ -71,7 +71,7 @@ struct BucketFunction {
   }
 
   FOLLY_ALWAYS_INLINE Status
-  call(int32_t& out, int32_t numBuckets, const arg_type<Timestamp>& input) {
+  call(int32_t& out, const arg_type<Timestamp>& input, int32_t numBuckets) {
     VELOX_USER_RETURN_LE(numBuckets, 0, "Invalid number of buckets.");
     const auto hash = Murmur3Hash32::hashInt64(input.toMicros());
     out = getBucketIndex(numBuckets, hash);
@@ -84,27 +84,27 @@ struct BucketFunction {
 void registerBucketFunctions(const std::string& prefix) {
   registerFunction<BucketFunction, int32_t, int32_t, int32_t>(
       {prefix + "bucket"});
-  registerFunction<BucketFunction, int32_t, int32_t, int64_t>(
+  registerFunction<BucketFunction, int32_t, int64_t, int32_t>(
       {prefix + "bucket"});
-  registerFunction<BucketFunction, int32_t, int32_t, Varchar>(
+  registerFunction<BucketFunction, int32_t, Varchar, int32_t>(
       {prefix + "bucket"});
-  registerFunction<BucketFunction, int32_t, int32_t, Varbinary>(
+  registerFunction<BucketFunction, int32_t, Varbinary, int32_t>(
       {prefix + "bucket"});
-  registerFunction<BucketFunction, int32_t, int32_t, Date>({prefix + "bucket"});
-  registerFunction<BucketFunction, int32_t, int32_t, Timestamp>(
+  registerFunction<BucketFunction, int32_t, Date, int32_t>({prefix + "bucket"});
+  registerFunction<BucketFunction, int32_t, Timestamp, int32_t>(
       {prefix + "bucket"});
 
   registerFunction<
       BucketDecimalFunction,
       int32_t,
-      int32_t,
-      LongDecimal<P1, S1>>({prefix + "bucket"});
+      LongDecimal<P1, S1>,
+      int32_t>({prefix + "bucket"});
 
   registerFunction<
       BucketDecimalFunction,
       int32_t,
-      int32_t,
-      ShortDecimal<P1, S1>>({prefix + "bucket"});
+      ShortDecimal<P1, S1>,
+      int32_t>({prefix + "bucket"});
 }
 
 } // namespace facebook::velox::functions::iceberg

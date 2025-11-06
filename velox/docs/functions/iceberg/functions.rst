@@ -8,7 +8,7 @@ Function names link to function description.
 These functions are used in partition transform.
 Refer to `Iceberg documenation <https://iceberg.apache.org/spec/#partition-transforms>`_ for details.
 
-.. iceberg:function:: bucket(numBuckets, input) -> integer
+.. iceberg:function:: bucket(input, numBuckets) -> integer
 
    Returns an integer between 0 and numBuckets - 1, indicating the assigned bucket.
    Bucket partitioning is based on a 32-bit hash of the input, specifically using the x86
@@ -16,12 +16,12 @@ Refer to `Iceberg documenation <https://iceberg.apache.org/spec/#partition-trans
 
    The function can be expressed in pseudo-code as below. ::
 
-       def bucket(numBuckets, input)= (murmur3_x86_32_hash(input) & Integer.MAX_VALUE) % numBuckets
+       def bucket(input, numBuckets)= (murmur3_x86_32_hash(input) & Integer.MAX_VALUE) % numBuckets
 
    The ``numBuckets`` is of type INTEGER and must be greater than 0. Otherwise, an exception is thrown.
    Supported types for ``input`` are INTEGER, BIGINT, DECIMAL, DATE, TIMESTAMP, VARCHAR, VARBINARY. ::
-       SELECT bucket(128, 'abcd'); -- 4
-       SELECT bucket(100, 34L); -- 79
+       SELECT bucket('abcd', 128); -- 4
+       SELECT bucket(34L, 100); -- 79
 
 .. iceberg:function:: days(input) -> date
 
