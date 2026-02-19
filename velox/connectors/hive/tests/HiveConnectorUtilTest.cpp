@@ -944,4 +944,36 @@ TEST_F(HiveConnectorUtilTest, createRangeFilter) {
   }
 }
 
+TEST_F(HiveConnectorUtilTest, getColumnNameFromSubfield) {
+  // Test basic column name extraction from subfield.
+  {
+    common::Subfield subfield("column_name.field_name");
+    EXPECT_EQ(hive::getColumnName(subfield), "column_name");
+  }
+
+  // Test nested field access.
+  {
+    common::Subfield subfield("column_name.field1.field2");
+    EXPECT_EQ(hive::getColumnName(subfield), "column_name");
+  }
+
+  // Test array subscript.
+  {
+    common::Subfield subfield("column_name[0].field_name");
+    EXPECT_EQ(hive::getColumnName(subfield), "column_name");
+  }
+
+  // Test map subscript.
+  {
+    common::Subfield subfield("column_name[\"key\"].field_name");
+    EXPECT_EQ(hive::getColumnName(subfield), "column_name");
+  }
+
+  // Test simple column (no subfields).
+  {
+    common::Subfield subfield("column_name");
+    EXPECT_EQ(hive::getColumnName(subfield), "column_name");
+  }
+}
+
 } // namespace facebook::velox::connector
