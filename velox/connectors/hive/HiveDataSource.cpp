@@ -110,13 +110,9 @@ HiveDataSource::HiveDataSource(
       const auto& subfieldColumnName = getColumnName(subfield);
       // When dereference pushdown is enabled, the handle name may be a
       // synthesized name like "column_name$_$_$field_name", while the subfield
-      // column name remains "column_name". We check if they match exactly or if
-      // the handle name starts with the subfield column name.
+      // column name remains "column_name".
       VELOX_USER_CHECK(
-          subfieldColumnName == handle->name() ||
-              (handle->name().size() > subfieldColumnName.size() &&
-               handle->name().compare(
-                   0, subfieldColumnName.size(), subfieldColumnName) == 0),
+          isValidSubfieldHandleName(handle->name(), subfieldColumnName),
           "Required subfield does not match column name: {} vs {}",
           subfieldColumnName,
           handle->name());

@@ -35,7 +35,21 @@ class HiveTableHandle;
 class HiveConfig;
 struct HiveConnectorSplit;
 
+// Separator pattern used in synthesized column names for dereference pushdown.
+// Format: "column_name$_$_$field_name"
+constexpr std::string_view kDereferenceSeparator = "$_$_$";
+
 const std::string& getColumnName(const common::Subfield& subfield);
+
+/// Validates that a handle name matches a subfield column name, accounting for
+/// synthesized column names created during dereference pushdown optimization.
+/// Returns true if:
+///   - handle name exactly matches subfield column name (normal case), OR
+///   - handle name starts with subfield column name followed by the dereference
+///     separator "$_$_$" (dereference pushdown case)
+bool isValidSubfieldHandleName(
+    const std::string& handleName,
+    const std::string& subfieldColumnName);
 
 void checkColumnNameLowerCase(const TypePtr& type);
 

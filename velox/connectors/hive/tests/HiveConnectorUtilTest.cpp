@@ -944,7 +944,7 @@ TEST_F(HiveConnectorUtilTest, createRangeFilter) {
   }
 }
 
-TEST_F(HiveConnectorUtilTest, getColumnNameFromSubfield) {
+TEST_F(HiveConnectorUtilTest, getColumnName) {
   // Test basic column name extraction from subfield.
   {
     common::Subfield subfield("column_name.field_name");
@@ -974,6 +974,68 @@ TEST_F(HiveConnectorUtilTest, getColumnNameFromSubfield) {
     common::Subfield subfield("column_name");
     EXPECT_EQ(hive::getColumnName(subfield), "column_name");
   }
+}
+
+TEST_F(HiveConnectorUtilTest, isValidSubfieldHandleName) {
+  // Test exact match (normal case without dereference pushdown)
+  EXPECT_TRUE(hive::isValidSubfieldHandleName("column_name", "column_name"));
+
+  // Test dereference pushdown case with separator "$_$_$"
+  // Handle names are synthesized as "original_name$_$_$field_path"
+  EXPECT_TRUE(hive::isValidSubfieldHandleName(
+      "column_name$_$_$field_name", "column_name"));
+
+  // Test dereference with nested field access (e.g., field1.field2)
+  // After the separator, field path can contain additional dots/indices
+  EXPECT_TRUE(hive::isValidSubfieldHandleName(
+      "column_name$_$_$field1.field2", "column_name"));
+
+  // Test invalid case: handle name without proper separator
+  EXPECT_FALSE(hive::isValidSubfieldHandleName("column_nameXfield", "column_name"));
+
+  // Test invalid case: incomplete separator (missing final '$')
+  EXPECT_FALSE(hive::isValidSubfieldHandleName(
+      "column_name$_$field_name", "column_name"));
+
+  // Test invalid case: completely different column names
+  EXPECT_FALSE(hive::isValidSubfieldHandleName("other_column", "column_name"));
+
+  // Test invalid case: handle name with separator but different column name
+  EXPECT_FALSE(hive::isValidSubfieldHandleName(
+      "different_column$_$_$field", "column_name"));
+
+  // Test invalid case: handle's column prefix doesn't exactly match the
+  // subfield column name. e.g., handle is "column_name$_$_$field" but subfield
+  // column is "column_name_extra". The handle was created for "column_name",
+  // but the required subfield is for a different column "column_name_extra",
+  // so validation fails.
+  EXPECT_FALSE(hive::isValidSubfieldHandleName(
+      "column_name$_$_$field", "column_name_extra"));
+
+  // Test invalid case: separator present but no field name follows.
+  // e.g., handle is "column_name$_$_$" (incomplete dereference).
+  // Field name must follow the separator, so this should fail.
+  EXPECT_FALSE(hive::isValidSubfieldHandleName(
+      "column_name$_$_$", "column_name"));
+
+  // Additional tests: validate dereference pushdown handles against
+  // various subfield extraction patterns (testing that the handle names
+  // generated during dereference pushdown validation work correctly)
+  // Test dereference handle against basic subfield
+  EXPECT_TRUE(hive::isValidSubfieldHandleName(
+      "column_name$_$_$field", "column_name"));
+
+  // Test dereference handle against nested field subfield
+  EXPECT_TRUE(hive::isValidSubfieldHandleName(
+      "column_name$_$_$field[0].nested", "column_name"));
+
+  // Test dereference handle against array subscript subfield
+  EXPECT_TRUE(hive::isValidSubfieldHandleName(
+      "column_name$_$_$[0]", "column_name"));
+
+  // Test dereference handle against map subscript subfield
+  EXPECT_TRUE(hive::isValidSubfieldHandleName(
+      "column_name$_$_$[\"key\"]", "column_name"));
 }
 
 } // namespace facebook::velox::connector
