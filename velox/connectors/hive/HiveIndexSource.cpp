@@ -597,10 +597,19 @@ void HiveIndexSource::init(
     auto* handle = it->second;
     readColumnNames.push_back(handle->name());
     for (auto& subfield : handle->requiredSubfields()) {
-      VELOX_USER_CHECK_EQ(
-          getColumnName(subfield),
-          handle->name(),
-          "Required subfield does not match column name");
+      const auto& subfieldColumnName = getColumnName(subfield);
+      // When dereference pushdown is enabled, the handle name may be a
+      // synthesized name like "column_name$_$_$field_name", while the subfield
+      // column name remains "column_name". We check if they match exactly or if
+      // the handle name starts with the subfield column name.
+      VELOX_USER_CHECK(
+          subfieldColumnName == handle->name() ||
+              (handle->name().size() > subfieldColumnName.size() &&
+               handle->name().compare(
+                   0, subfieldColumnName.size(), subfieldColumnName) == 0),
+          "Required subfield does not match column name: {} vs {}",
+          subfieldColumnName,
+          handle->name());
       projectedSubfields_[handle->name()].push_back(&subfield);
     }
     VELOX_CHECK_NULL(handle->postProcessor(), "Post processor not supported");
