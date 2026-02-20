@@ -600,6 +600,8 @@ void HiveIndexSource::init(
     // synthesized name like "column_name$_$_$field_name". In that case, we need
     // to read the base column name from the file, not the synthesized name.
     std::string columnNameToRead = handle->name();
+    TypePtr columnTypeToRead = readColumnTypes[readColumnNames.size()];
+    
     if (!handle->requiredSubfields().empty()) {
       const auto& subfieldColumnName = getColumnName(handle->requiredSubfields()[0]);
       VELOX_USER_CHECK(
@@ -609,9 +611,12 @@ void HiveIndexSource::init(
           handle->name());
       // Use the base column name for reading from the file
       columnNameToRead = subfieldColumnName;
+      // Get the full struct type from the file schema to avoid findBestLeaf crash
+      columnTypeToRead = tableHandle_->dataColumns()->findChild(columnNameToRead);
     }
     
     readColumnNames.push_back(columnNameToRead);
+    readColumnTypes[readColumnNames.size() - 1] = columnTypeToRead;
     for (auto& subfield : handle->requiredSubfields()) {
       projectedSubfields_[columnNameToRead].push_back(&subfield);
     }
