@@ -129,20 +129,21 @@ HiveDataSource::HiveDataSource(
       
       // Create a post-processor to extract the subfield after reading
       // The subfield path is like "x.currencycode", we need to extract "currencycode"
-      auto& subfield = handle->requiredSubfields()[0];
+      const auto& subfield = handle->requiredSubfields()[0];
       if (subfield.path().size() > 1) {
         auto* nestedField = subfield.path()[1]->asChecked<common::Subfield::NestedField>();
-        auto fieldName = nestedField->name();
+        std::string fieldName = nestedField->name();
         auto basePostProcessor = postProcessor;
+        // Capture by value to ensure safe lambda
         postProcessor = [fieldName, basePostProcessor](VectorPtr& vector) {
           // Apply original post-processor first if it exists
           if (basePostProcessor) {
             basePostProcessor(vector);
           }
-          // Extract the subfield
-          if (vector->type()->isRow()) {
+          // Extract the subfield - check vector is not null and is a ROW
+          if (vector && vector->type()->isRow()) {
             auto* rowVector = vector->as<RowVector>();
-            auto& rowType = vector->type()->asRow();
+            const auto& rowType = vector->type()->asRow();
             auto fieldIdx = rowType.getChildIdxIfExists(fieldName);
             if (fieldIdx.has_value()) {
               vector = rowVector->childAt(*fieldIdx);
