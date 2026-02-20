@@ -109,12 +109,7 @@ HiveDataSource::HiveDataSource(
     // When dereference pushdown is enabled, the handle name may be a
     // synthesized name like "column_name$_$_$field_name". In that case, we need
     // to read the base column name from the file, not the synthesized name.
-    // We also need to use the full struct type from the file, not the
-    // dereferenced field type, so that the reader can properly handle the struct.
     std::string columnNameToRead = handle->name();
-    TypePtr columnTypeToRead = readColumnTypes[readColumnNames.size()];
-    std::function<void(VectorPtr&)> postProcessor = handle->postProcessor();
-    
     if (!handle->requiredSubfields().empty()) {
       const auto& subfieldColumnName = getColumnName(handle->requiredSubfields()[0]);
       VELOX_USER_CHECK(
@@ -124,41 +119,13 @@ HiveDataSource::HiveDataSource(
           handle->name());
       // Use the base column name for reading from the file
       columnNameToRead = subfieldColumnName;
-      // Get the full struct type from the file schema
-      columnTypeToRead = hiveTableHandle_->dataColumns()->findChild(columnNameToRead);
-      
-      // Create a post-processor to extract the subfield after reading
-      // The subfield path is like "x.currencycode", we need to extract "currencycode"
-      const auto& subfield = handle->requiredSubfields()[0];
-      if (subfield.path().size() > 1) {
-        auto* nestedField = subfield.path()[1]->asChecked<common::Subfield::NestedField>();
-        std::string fieldName = nestedField->name();
-        auto basePostProcessor = postProcessor;
-        // Capture by value to ensure safe lambda
-        postProcessor = [fieldName, basePostProcessor](VectorPtr& vector) {
-          // Apply original post-processor first if it exists
-          if (basePostProcessor) {
-            basePostProcessor(vector);
-          }
-          // Extract the subfield - check vector is not null and is a ROW
-          if (vector && vector->type()->isRow()) {
-            auto* rowVector = vector->as<RowVector>();
-            const auto& rowType = vector->type()->asRow();
-            auto fieldIdx = rowType.getChildIdxIfExists(fieldName);
-            if (fieldIdx.has_value()) {
-              vector = rowVector->childAt(*fieldIdx);
-            }
-          }
-        };
-      }
     }
     
     readColumnNames.push_back(columnNameToRead);
-    readColumnTypes[readColumnNames.size() - 1] = columnTypeToRead;
     for (auto& subfield : handle->requiredSubfields()) {
       subfields_[columnNameToRead].push_back(&subfield);
     }
-    columnPostProcessors_.push_back(postProcessor);
+    columnPostProcessors_.push_back(handle->postProcessor());
   }
 
   if (hiveConfig_->isFileColumnNamesReadAsLowerCase(
