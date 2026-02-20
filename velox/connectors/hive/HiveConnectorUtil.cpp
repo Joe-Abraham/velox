@@ -258,6 +258,38 @@ const std::string& getColumnName(const common::Subfield& subfield) {
   return field->name();
 }
 
+bool isValidSubfieldHandleName(
+    const std::string& handleName,
+    const std::string& subfieldColumnName) {
+  // Check for exact match (normal case without dereference pushdown)
+  if (subfieldColumnName == handleName) {
+    return true;
+  }
+
+  // Check for dereference pushdown case: handle name should be
+  // "column_name$_$_$field_name" where column_name is subfieldColumnName.
+  // The size must be greater than column_name + separator to allow for field_name.
+  const size_t minSize = subfieldColumnName.size() + kDereferenceSeparator.size();
+  if (handleName.size() <= minSize) {
+    return false;
+  }
+
+  // Verify handle name starts with column_name and is followed by separator
+  if (handleName.compare(0, subfieldColumnName.size(), subfieldColumnName) !=
+      0) {
+    return false;
+  }
+
+  if (handleName.compare(
+          subfieldColumnName.size(),
+          kDereferenceSeparator.size(),
+          kDereferenceSeparator) != 0) {
+    return false;
+  }
+
+  return true;
+}
+
 void checkColumnNameLowerCase(const TypePtr& type) {
   switch (type->kind()) {
     case TypeKind::ARRAY:

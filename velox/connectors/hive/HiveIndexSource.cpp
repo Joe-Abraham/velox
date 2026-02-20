@@ -595,13 +595,30 @@ void HiveIndexSource::init(
         outputName);
 
     auto* handle = it->second;
-    readColumnNames.push_back(handle->name());
+    
+    // When dereference pushdown is enabled, the handle name may be a
+    // synthesized name like "column_name$_$_$field_name". In that case, we need
+    // to read the base column name from the file, not the synthesized name.
+    std::string columnNameToRead = handle->name();
+    TypePtr columnTypeToRead = readColumnTypes[readColumnNames.size()];
+    
+    if (!handle->requiredSubfields().empty()) {
+      const auto& subfieldColumnName = getColumnName(handle->requiredSubfields()[0]);
+      VELOX_USER_CHECK(
+          isValidSubfieldHandleName(handle->name(), subfieldColumnName),
+          "Required subfield does not match column name: {} vs {}",
+          subfieldColumnName,
+          handle->name());
+      // Use the base column name for reading from the file
+      columnNameToRead = subfieldColumnName;
+      // Get the full struct type from the file schema to avoid findBestLeaf crash
+      columnTypeToRead = tableHandle_->dataColumns()->findChild(columnNameToRead);
+    }
+    
+    readColumnNames.push_back(columnNameToRead);
+    readColumnTypes[readColumnNames.size() - 1] = columnTypeToRead;
     for (auto& subfield : handle->requiredSubfields()) {
-      VELOX_USER_CHECK_EQ(
-          getColumnName(subfield),
-          handle->name(),
-          "Required subfield does not match column name");
-      projectedSubfields_[handle->name()].push_back(&subfield);
+      projectedSubfields_[columnNameToRead].push_back(&subfield);
     }
     VELOX_CHECK_NULL(handle->postProcessor(), "Post processor not supported");
   }
