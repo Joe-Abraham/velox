@@ -105,18 +105,25 @@ HiveDataSource::HiveDataSource(
         outputName);
 
     auto* handle = static_cast<const HiveColumnHandle*>(it->second.get());
-    readColumnNames.push_back(handle->name());
-    for (auto& subfield : handle->requiredSubfields()) {
-      const auto& subfieldColumnName = getColumnName(subfield);
-      // When dereference pushdown is enabled, the handle name may be a
-      // synthesized name like "column_name$_$_$field_name", while the subfield
-      // column name remains "column_name".
+    
+    // When dereference pushdown is enabled, the handle name may be a
+    // synthesized name like "column_name$_$_$field_name". In that case, we need
+    // to read the base column name from the file, not the synthesized name.
+    std::string columnNameToRead = handle->name();
+    if (!handle->requiredSubfields().empty()) {
+      const auto& subfieldColumnName = getColumnName(handle->requiredSubfields()[0]);
       VELOX_USER_CHECK(
           isValidSubfieldHandleName(handle->name(), subfieldColumnName),
           "Required subfield does not match column name: {} vs {}",
           subfieldColumnName,
           handle->name());
-      subfields_[handle->name()].push_back(&subfield);
+      // Use the base column name for reading from the file
+      columnNameToRead = subfieldColumnName;
+    }
+    
+    readColumnNames.push_back(columnNameToRead);
+    for (auto& subfield : handle->requiredSubfields()) {
+      subfields_[columnNameToRead].push_back(&subfield);
     }
     columnPostProcessors_.push_back(handle->postProcessor());
   }
