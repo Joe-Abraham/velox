@@ -63,6 +63,27 @@ void IcebergSplitReader::prepareSplit(
   }
   auto rowType = getAdaptedRowType();
 
+  // Initialize row lineage tracking for _last_updated_sequence_number.
+  dataSequenceNumber_ = std::nullopt;
+  if (auto it = hiveSplit_->infoColumns.find("$data_sequence_number");
+      it != hiveSplit_->infoColumns.end()) {
+    dataSequenceNumber_ = folly::to<int64_t>(it->second);
+  }
+  readLastUpdatedSeqNumFromFile_ = false;
+  lastUpdatedSeqNumOutputIndex_ = std::nullopt;
+  if (dataSequenceNumber_.has_value()) {
+    auto* seqNumSpec = scanSpec_->childByName(
+        IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName);
+    if (seqNumSpec && !seqNumSpec->isConstant()) {
+      auto idx = readerOutputType_->getChildIdxIfExists(
+          IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName);
+      if (idx.has_value()) {
+        readLastUpdatedSeqNumFromFile_ = true;
+        lastUpdatedSeqNumOutputIndex_ = *idx;
+      }
+    }
+  }
+
   if (checkIfSplitIsEmpty(runtimeStats)) {
     VELOX_CHECK(emptySplit_);
     return;
@@ -149,12 +170,51 @@ uint64_t IcebergSplitReader::next(uint64_t size, VectorPtr& output) {
 
   auto rowsScanned = baseRowReader_->next(actualSize, output, &mutation);
 
+  // For Iceberg V3 row lineage: replace 0 values in
+  // _last_updated_sequence_number with the data sequence number from the
+  // file's manifest entry. A value of 0 means the row has not been committed
+  // to a table and must be inherited.
+  if (readLastUpdatedSeqNumFromFile_ && dataSequenceNumber_.has_value() &&
+      lastUpdatedSeqNumOutputIndex_.has_value() && rowsScanned > 0) {
+    auto* rowOutput = output->as<RowVector>();
+    if (rowOutput) {
+      auto& seqNumChild =
+          rowOutput->childAt(*lastUpdatedSeqNumOutputIndex_);
+      if (seqNumChild->isConstantEncoding()) {
+        auto* simpleVec = seqNumChild->as<SimpleVector<int64_t>>();
+        if (simpleVec && !simpleVec->isNullAt(0) &&
+            simpleVec->valueAt(0) == 0) {
+          seqNumChild = std::make_shared<ConstantVector<int64_t>>(
+              connectorQueryCtx_->memoryPool(),
+              rowsScanned,
+              false,
+              BIGINT(),
+              *dataSequenceNumber_);
+        }
+      } else if (auto* flatVec = seqNumChild->asFlatVector<int64_t>()) {
+        for (vector_size_t i = 0; i < rowsScanned; ++i) {
+          if (!flatVec->isNullAt(i) && flatVec->valueAt(i) == 0) {
+            flatVec->set(i, *dataSequenceNumber_);
+          }
+        }
+      }
+    }
+  }
+
   return rowsScanned;
 }
 
 std::vector<TypePtr> IcebergSplitReader::adaptColumns(
     const RowTypePtr& fileType,
     const RowTypePtr& tableSchema) const {
+  // Resolve the data sequence number from split info columns for
+  // _last_updated_sequence_number inheritance.
+  std::optional<int64_t> dataSeqNum;
+  if (auto it = hiveSplit_->infoColumns.find("$data_sequence_number");
+      it != hiveSplit_->infoColumns.end()) {
+    dataSeqNum = folly::to<int64_t>(it->second);
+  }
+
   std::vector<TypePtr> columnTypes = fileType->children();
   auto& childrenSpecs = scanSpec_->children();
   // Iceberg table stores all column's data in data file.
@@ -186,9 +246,24 @@ std::vector<TypePtr> IcebergSplitReader::adaptColumns(
         // files, partition column values are stored in partition metadata
         // rather than in the data file itself, following Hive's partitioning
         // convention.
+        // 3. _last_updated_sequence_number: For Iceberg V3 row lineage, if
+        // the column is not in the file, inherit the data sequence number
+        // from the file's manifest entry.
         if (auto it = hiveSplit_->partitionKeys.find(fieldName);
             it != hiveSplit_->partitionKeys.end()) {
           setPartitionValue(childSpec.get(), fieldName, it->second);
+        } else if (
+            fieldName ==
+                IcebergMetadataColumn::
+                    kLastUpdatedSequenceNumberColumnName &&
+            dataSeqNum.has_value()) {
+          childSpec->setConstantValue(
+              std::make_shared<ConstantVector<int64_t>>(
+                  connectorQueryCtx_->memoryPool(),
+                  1,
+                  false,
+                  BIGINT(),
+                  *dataSeqNum));
         } else {
           childSpec->setConstantValue(
               BaseVector::createNullConstant(
