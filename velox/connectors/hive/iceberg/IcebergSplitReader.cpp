@@ -60,11 +60,85 @@ void IcebergSplitReader::prepareSplit(
     std::shared_ptr<common::MetadataFilter> metadataFilter,
     dwio::common::RuntimeStatistics& runtimeStats,
     const folly::F14FastMap<std::string, std::string>& fileReadOps) {
+  // Expand the file schema to include row lineage metadata columns
+  // (_row_id and _last_updated_sequence_number) if they're requested
+  // in the output. These are hidden metadata columns physically stored
+  // in Iceberg V3 data files but not listed in the table's logical
+  // schema (dataColumns). The Parquet reader needs them in the file
+  // schema to read them from the file.
+  auto fileSchema = baseReaderOpts_.fileSchema();
+  if (fileSchema) {
+    auto names = fileSchema->names();
+    auto types = fileSchema->children();
+    bool modified = false;
+    for (const auto* colName :
+         {IcebergMetadataColumn::kRowIdColumnName,
+          IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName}) {
+      if (readerOutputType_->containsChild(colName) &&
+          !fileSchema->containsChild(colName)) {
+        names.push_back(std::string(colName));
+        types.push_back(BIGINT());
+        modified = true;
+      }
+    }
+    if (modified) {
+      baseReaderOpts_.setFileSchema(ROW(std::move(names), std::move(types)));
+    }
+  }
+
   createReader();
   if (emptySplit_) {
     return;
   }
+
+  // Initialize firstRowId_ BEFORE getAdaptedRowType() because adaptColumns()
+  // needs it to decide whether to set _row_id as a constant or leave it
+  // for next() to compute.
+  firstRowId_ = std::nullopt;
+  if (auto it = hiveSplit_->infoColumns.find("$first_row_id");
+      it != hiveSplit_->infoColumns.end()) {
+    auto value = folly::to<int64_t>(it->second);
+    if (value >= 0) {
+      firstRowId_ = value;
+    }
+  }
+
   auto rowType = getAdaptedRowType();
+
+  // Initialize row lineage tracking for _last_updated_sequence_number.
+  dataSequenceNumber_ = std::nullopt;
+  if (auto it = hiveSplit_->infoColumns.find("$data_sequence_number");
+      it != hiveSplit_->infoColumns.end()) {
+    dataSequenceNumber_ = folly::to<int64_t>(it->second);
+  }
+  readLastUpdatedSeqNumFromFile_ = false;
+  lastUpdatedSeqNumOutputIndex_ = std::nullopt;
+  if (dataSequenceNumber_.has_value()) {
+    auto* seqNumSpec = scanSpec_->childByName(
+        IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName);
+    if (seqNumSpec && !seqNumSpec->isConstant()) {
+      auto idx = readerOutputType_->getChildIdxIfExists(
+          IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName);
+      if (idx.has_value()) {
+        readLastUpdatedSeqNumFromFile_ = true;
+        lastUpdatedSeqNumOutputIndex_ = *idx;
+      }
+    }
+  }
+
+  // Initialize row lineage tracking for _row_id.
+  // firstRowId_ was set above (before adaptColumns). Now check if _row_id
+  // needs to be computed in next().
+  computeRowId_ = false;
+  rowIdOutputIndex_ = std::nullopt;
+  if (firstRowId_.has_value()) {
+    auto idx = readerOutputType_->getChildIdxIfExists(
+        IcebergMetadataColumn::kRowIdColumnName);
+    if (idx.has_value()) {
+      computeRowId_ = true;
+      rowIdOutputIndex_ = *idx;
+    }
+  }
 
   if (checkIfSplitIsEmpty(runtimeStats)) {
     VELOX_CHECK(emptySplit_);
@@ -160,12 +234,126 @@ uint64_t IcebergSplitReader::next(uint64_t size, VectorPtr& output) {
 
   auto rowsScanned = baseRowReader_->next(actualSize, output, &mutation);
 
+  // For Iceberg V3 row lineage: replace null values in
+  // _last_updated_sequence_number with the data sequence number from the
+  // file's manifest entry. Per the spec, null means the value should be
+  // inherited from the manifest entry's sequence number.
+  if (readLastUpdatedSeqNumFromFile_ && dataSequenceNumber_.has_value() &&
+      lastUpdatedSeqNumOutputIndex_.has_value() && rowsScanned > 0) {
+    auto* rowOutput = output->as<RowVector>();
+    if (rowOutput) {
+      auto& seqNumChild = rowOutput->childAt(*lastUpdatedSeqNumOutputIndex_);
+      // Load lazy vector if needed — the Parquet reader wraps columns in
+      // LazyVector, which must be loaded before checking encoding.
+      const auto& loadedSeqNum = BaseVector::loadedVectorShared(seqNumChild);
+      if (loadedSeqNum->isConstantEncoding()) {
+        auto* simpleVec = loadedSeqNum->as<SimpleVector<int64_t>>();
+        if (simpleVec && simpleVec->isNullAt(0)) {
+          seqNumChild = std::make_shared<ConstantVector<int64_t>>(
+              connectorQueryCtx_->memoryPool(),
+              rowsScanned,
+              false,
+              BIGINT(),
+              static_cast<int64_t>(*dataSequenceNumber_));
+        }
+      } else if (auto* flatVec = loadedSeqNum->asFlatVector<int64_t>()) {
+        for (vector_size_t i = 0; i < rowsScanned; ++i) {
+          if (flatVec->isNullAt(i)) {
+            flatVec->set(i, *dataSequenceNumber_);
+          }
+        }
+      }
+    }
+  }
+
+  // For Iceberg V3 row lineage: compute _row_id = first_row_id + _pos.
+  // When the data file doesn't contain _row_id physically, compute it from
+  // the manifest entry's first_row_id plus the row's position in the file.
+  // When positional deletes are applied, we track actual file positions
+  // using the deletion bitmap.
+  if (computeRowId_ && firstRowId_.has_value() &&
+      rowIdOutputIndex_.has_value() && rowsScanned > 0) {
+    auto* rowOutput = output->as<RowVector>();
+    if (rowOutput) {
+      auto& rowIdChild = rowOutput->childAt(*rowIdOutputIndex_);
+      // Load lazy vector if needed — the Parquet reader wraps columns in
+      // LazyVector, which must be loaded before checking encoding.
+      const auto& loadedRowId = BaseVector::loadedVectorShared(rowIdChild);
+      if (loadedRowId->isConstantEncoding()) {
+        auto* simpleVec = loadedRowId->as<SimpleVector<int64_t>>();
+        if (simpleVec && simpleVec->isNullAt(0)) {
+          auto pool = connectorQueryCtx_->memoryPool();
+          auto flatVec = BaseVector::create<FlatVector<int64_t>>(
+              BIGINT(), rowsScanned, pool);
+          int64_t batchStartPos = splitOffset_ + baseReadOffset_;
+          if (mutation.deletedRows == nullptr) {
+            // No deletions: positions are contiguous.
+            for (vector_size_t i = 0; i < rowsScanned; ++i) {
+              flatVec->set(
+                  i, static_cast<int64_t>(*firstRowId_) + batchStartPos + i);
+            }
+          } else {
+            // With deletions: use the bitmap to find actual file positions
+            // of surviving rows.
+            vector_size_t outputIdx = 0;
+            for (vector_size_t j = 0;
+                 j < static_cast<vector_size_t>(actualSize) &&
+                 outputIdx < rowsScanned;
+                 ++j) {
+              if (!bits::isBitSet(mutation.deletedRows, j)) {
+                flatVec->set(
+                    outputIdx++,
+                    static_cast<int64_t>(*firstRowId_) + batchStartPos + j);
+              }
+            }
+          }
+          rowIdChild = flatVec;
+        }
+      } else if (auto* flatVec = loadedRowId->asFlatVector<int64_t>()) {
+        // Column is in the file but has some null values — replace nulls
+        // with first_row_id + _pos.
+        int64_t batchStartPos = splitOffset_ + baseReadOffset_;
+        if (mutation.deletedRows == nullptr) {
+          for (vector_size_t i = 0; i < rowsScanned; ++i) {
+            if (flatVec->isNullAt(i)) {
+              flatVec->set(
+                  i, static_cast<int64_t>(*firstRowId_) + batchStartPos + i);
+            }
+          }
+        } else {
+          vector_size_t outputIdx = 0;
+          for (vector_size_t j = 0;
+               j < static_cast<vector_size_t>(actualSize) &&
+               outputIdx < rowsScanned;
+               ++j) {
+            if (!bits::isBitSet(mutation.deletedRows, j)) {
+              if (flatVec->isNullAt(outputIdx)) {
+                flatVec->set(
+                    outputIdx,
+                    static_cast<int64_t>(*firstRowId_) + batchStartPos + j);
+              }
+              ++outputIdx;
+            }
+          }
+        }
+      }
+    }
+  }
+
   return rowsScanned;
 }
 
 std::vector<TypePtr> IcebergSplitReader::adaptColumns(
     const RowTypePtr& fileType,
     const RowTypePtr& tableSchema) const {
+  // Resolve the data sequence number from split info columns for
+  // _last_updated_sequence_number inheritance.
+  std::optional<int64_t> dataSeqNum;
+  if (auto it = hiveSplit_->infoColumns.find("$data_sequence_number");
+      it != hiveSplit_->infoColumns.end()) {
+    dataSeqNum = folly::to<int64_t>(it->second);
+  }
+
   std::vector<TypePtr> columnTypes = fileType->children();
   auto& childrenSpecs = scanSpec_->children();
   // Iceberg table stores all column's data in data file.
@@ -197,15 +385,52 @@ std::vector<TypePtr> IcebergSplitReader::adaptColumns(
         // files, partition column values are stored in partition metadata
         // rather than in the data file itself, following Hive's partitioning
         // convention.
+        // 3. _last_updated_sequence_number: For Iceberg V3 row lineage, if
+        // the column is not in the file, inherit the data sequence number
+        // from the file's manifest entry.
+        // 4. _row_id: For Iceberg V3 row lineage, if the column is not in
+        // the file, set as NULL constant here. When first_row_id is
+        // available, next() will replace NULL with first_row_id + _pos.
         if (auto it = hiveSplit_->partitionKeys.find(fieldName);
             it != hiveSplit_->partitionKeys.end()) {
           setPartitionValue(childSpec.get(), fieldName, it->second);
-        } else {
+        } else if (
+            fieldName ==
+                IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName &&
+            dataSeqNum.has_value()) {
+          childSpec->setConstantValue(
+              std::make_shared<ConstantVector<int64_t>>(
+                  connectorQueryCtx_->memoryPool(),
+                  1,
+                  false,
+                  BIGINT(),
+                  static_cast<int64_t>(*dataSeqNum)));
+        } else if (
+            fieldName == IcebergMetadataColumn::kRowIdColumnName &&
+            firstRowId_.has_value()) {
+          // _row_id will be computed in next() as first_row_id + _pos.
+          // Set a NULL constant here as a placeholder; next() will replace
+          // it with computed values.
+          auto outputIdx = readerOutputType_->getChildIdxIfExists(fieldName);
+          auto colType = outputIdx.has_value()
+              ? readerOutputType_->childAt(*outputIdx)
+              : BIGINT();
           childSpec->setConstantValue(
               BaseVector::createNullConstant(
-                  tableSchema->findChild(fieldName),
-                  1,
-                  connectorQueryCtx_->memoryPool()));
+                  colType, 1, connectorQueryCtx_->memoryPool()));
+        } else {
+          // Column missing from both the file and partition keys. This
+          // can be a schema evolution column (in tableSchema) or a
+          // metadata column like _row_id (in readerOutputType_ but not
+          // in tableSchema). Try readerOutputType_ first, then fall
+          // back to tableSchema.
+          auto outputIdx = readerOutputType_->getChildIdxIfExists(fieldName);
+          auto colType = outputIdx.has_value()
+              ? readerOutputType_->childAt(*outputIdx)
+              : tableSchema->findChild(fieldName);
+          childSpec->setConstantValue(
+              BaseVector::createNullConstant(
+                  colType, 1, connectorQueryCtx_->memoryPool()));
         }
       }
     }
