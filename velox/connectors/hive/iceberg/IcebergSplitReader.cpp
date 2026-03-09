@@ -346,14 +346,6 @@ uint64_t IcebergSplitReader::next(uint64_t size, VectorPtr& output) {
 std::vector<TypePtr> IcebergSplitReader::adaptColumns(
     const RowTypePtr& fileType,
     const RowTypePtr& tableSchema) const {
-  // Resolve the data sequence number from split info columns for
-  // _last_updated_sequence_number inheritance.
-  std::optional<int64_t> dataSeqNum;
-  if (auto it = hiveSplit_->infoColumns.find("$data_sequence_number");
-      it != hiveSplit_->infoColumns.end()) {
-    dataSeqNum = folly::to<int64_t>(it->second);
-  }
-
   std::vector<TypePtr> columnTypes = fileType->children();
   auto& childrenSpecs = scanSpec_->children();
   // Iceberg table stores all column's data in data file.
@@ -397,27 +389,14 @@ std::vector<TypePtr> IcebergSplitReader::adaptColumns(
         } else if (
             fieldName ==
                 IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName &&
-            dataSeqNum.has_value()) {
+            dataSequenceNumber_.has_value()) {
           childSpec->setConstantValue(
               std::make_shared<ConstantVector<int64_t>>(
                   connectorQueryCtx_->memoryPool(),
                   1,
                   false,
                   BIGINT(),
-                  static_cast<int64_t>(*dataSeqNum)));
-        } else if (
-            fieldName == IcebergMetadataColumn::kRowIdColumnName &&
-            firstRowId_.has_value()) {
-          // _row_id will be computed in next() as first_row_id + _pos.
-          // Set a NULL constant here as a placeholder; next() will replace
-          // it with computed values.
-          auto outputIdx = readerOutputType_->getChildIdxIfExists(fieldName);
-          auto colType = outputIdx.has_value()
-              ? readerOutputType_->childAt(*outputIdx)
-              : BIGINT();
-          childSpec->setConstantValue(
-              BaseVector::createNullConstant(
-                  colType, 1, connectorQueryCtx_->memoryPool()));
+                  static_cast<int64_t>(*dataSequenceNumber_)));
         } else {
           // Column missing from both the file and partition keys. This
           // can be a schema evolution column (in tableSchema) or a
