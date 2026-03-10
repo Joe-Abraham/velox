@@ -981,7 +981,6 @@ TEST_F(HiveIcebergTest, skipDeleteFileByPositionUpperBound) {
 TEST_F(HiveIcebergTest, readRowIdColumn) {
   folly::SingletonVault::singleton()->registrationComplete();
 
-  auto rowIdColumn = IcebergMetadataColumn::icebergRowIdColumn();
   auto fileRowType = ROW({"c0", "_row_id"}, {BIGINT(), BIGINT()});
 
   // Write data file with c0 and _row_id columns.

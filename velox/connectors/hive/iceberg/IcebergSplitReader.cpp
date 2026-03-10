@@ -91,9 +91,8 @@ void IcebergSplitReader::prepareSplit(
     return;
   }
 
-  // Initialize firstRowId_ BEFORE getAdaptedRowType() because adaptColumns()
-  // needs it to decide whether to set _row_id as a constant or leave it
-  // for next() to compute.
+  // Initialize row lineage fields BEFORE getAdaptedRowType() because
+  // adaptColumns() needs them to decide how to handle missing columns.
   firstRowId_ = std::nullopt;
   if (auto it = hiveSplit_->infoColumns.find("$first_row_id");
       it != hiveSplit_->infoColumns.end()) {
@@ -103,14 +102,18 @@ void IcebergSplitReader::prepareSplit(
     }
   }
 
-  auto rowType = getAdaptedRowType();
-
-  // Initialize row lineage tracking for _last_updated_sequence_number.
   dataSequenceNumber_ = std::nullopt;
   if (auto it = hiveSplit_->infoColumns.find("$data_sequence_number");
       it != hiveSplit_->infoColumns.end()) {
     dataSequenceNumber_ = folly::to<int64_t>(it->second);
   }
+
+  auto rowType = getAdaptedRowType();
+
+  // After adaptColumns(), check if row lineage columns need null replacement
+  // in next(). If adaptColumns() set them as constants (column missing from
+  // file), no replacement is needed. If the column is read from the file
+  // (not constant), null values must be replaced per spec.
   readLastUpdatedSeqNumFromFile_ = false;
   lastUpdatedSeqNumOutputIndex_ = std::nullopt;
   if (dataSequenceNumber_.has_value()) {
@@ -126,9 +129,6 @@ void IcebergSplitReader::prepareSplit(
     }
   }
 
-  // Initialize row lineage tracking for _row_id.
-  // firstRowId_ was set above (before adaptColumns). Now check if _row_id
-  // needs to be computed in next().
   computeRowId_ = false;
   rowIdOutputIndex_ = std::nullopt;
   if (firstRowId_.has_value()) {
@@ -243,25 +243,35 @@ uint64_t IcebergSplitReader::next(uint64_t size, VectorPtr& output) {
     auto* rowOutput = output->as<RowVector>();
     if (rowOutput) {
       auto& seqNumChild = rowOutput->childAt(*lastUpdatedSeqNumOutputIndex_);
-      // Load lazy vector if needed — the Parquet reader wraps columns in
-      // LazyVector, which must be loaded before checking encoding.
-      const auto& loadedSeqNum = BaseVector::loadedVectorShared(seqNumChild);
-      if (loadedSeqNum->isConstantEncoding()) {
-        auto* simpleVec = loadedSeqNum->as<SimpleVector<int64_t>>();
-        if (simpleVec && simpleVec->isNullAt(0)) {
+      // Load lazy vector and replace the child reference so we can access
+      // the actual data. The Parquet reader wraps columns in LazyVector.
+      seqNumChild = BaseVector::loadedVectorShared(seqNumChild);
+      auto vectorSize = seqNumChild->size();
+
+      if (seqNumChild->isConstantEncoding()) {
+        if (seqNumChild->isNullAt(0)) {
           seqNumChild = std::make_shared<ConstantVector<int64_t>>(
               connectorQueryCtx_->memoryPool(),
-              rowsScanned,
+              vectorSize,
               false,
               BIGINT(),
               static_cast<int64_t>(*dataSequenceNumber_));
         }
-      } else if (auto* flatVec = loadedSeqNum->asFlatVector<int64_t>()) {
-        for (vector_size_t i = 0; i < rowsScanned; ++i) {
-          if (flatVec->isNullAt(i)) {
-            flatVec->set(i, *dataSequenceNumber_);
+      } else if (seqNumChild->mayHaveNulls()) {
+        // Handle any vector encoding (flat, dictionary, etc.) by creating
+        // a new flat vector with null values replaced.
+        auto pool = connectorQueryCtx_->memoryPool();
+        auto* simpleVec = seqNumChild->as<SimpleVector<int64_t>>();
+        auto newFlat = BaseVector::create<FlatVector<int64_t>>(
+            BIGINT(), vectorSize, pool);
+        for (vector_size_t i = 0; i < vectorSize; ++i) {
+          if (simpleVec->isNullAt(i)) {
+            newFlat->set(i, *dataSequenceNumber_);
+          } else {
+            newFlat->set(i, simpleVec->valueAt(i));
           }
         }
+        seqNumChild = newFlat;
       }
     }
   }
@@ -276,66 +286,73 @@ uint64_t IcebergSplitReader::next(uint64_t size, VectorPtr& output) {
     auto* rowOutput = output->as<RowVector>();
     if (rowOutput) {
       auto& rowIdChild = rowOutput->childAt(*rowIdOutputIndex_);
-      // Load lazy vector if needed — the Parquet reader wraps columns in
-      // LazyVector, which must be loaded before checking encoding.
-      const auto& loadedRowId = BaseVector::loadedVectorShared(rowIdChild);
-      if (loadedRowId->isConstantEncoding()) {
-        auto* simpleVec = loadedRowId->as<SimpleVector<int64_t>>();
-        if (simpleVec && simpleVec->isNullAt(0)) {
-          auto pool = connectorQueryCtx_->memoryPool();
-          auto flatVec = BaseVector::create<FlatVector<int64_t>>(
-              BIGINT(), rowsScanned, pool);
-          int64_t batchStartPos = splitOffset_ + baseReadOffset_;
-          if (mutation.deletedRows == nullptr) {
-            // No deletions: positions are contiguous.
-            for (vector_size_t i = 0; i < rowsScanned; ++i) {
-              flatVec->set(
-                  i, static_cast<int64_t>(*firstRowId_) + batchStartPos + i);
-            }
-          } else {
-            // With deletions: use the bitmap to find actual file positions
-            // of surviving rows.
-            vector_size_t outputIdx = 0;
-            for (vector_size_t j = 0;
-                 j < static_cast<vector_size_t>(actualSize) &&
-                 outputIdx < rowsScanned;
-                 ++j) {
-              if (!bits::isBitSet(mutation.deletedRows, j)) {
-                flatVec->set(
-                    outputIdx++,
-                    static_cast<int64_t>(*firstRowId_) + batchStartPos + j);
-              }
-            }
-          }
-          rowIdChild = flatVec;
-        }
-      } else if (auto* flatVec = loadedRowId->asFlatVector<int64_t>()) {
-        // Column is in the file but has some null values — replace nulls
-        // with first_row_id + _pos.
+      // Load lazy vector and replace the child reference.
+      rowIdChild = BaseVector::loadedVectorShared(rowIdChild);
+      auto vectorSize = rowIdChild->size();
+
+      if (rowIdChild->isConstantEncoding() && rowIdChild->isNullAt(0)) {
+        // All null — compute _row_id = first_row_id + _pos for all rows.
+        auto pool = connectorQueryCtx_->memoryPool();
+        auto flatVec = BaseVector::create<FlatVector<int64_t>>(
+            BIGINT(), vectorSize, pool);
         int64_t batchStartPos = splitOffset_ + baseReadOffset_;
         if (mutation.deletedRows == nullptr) {
-          for (vector_size_t i = 0; i < rowsScanned; ++i) {
-            if (flatVec->isNullAt(i)) {
+          for (vector_size_t i = 0; i < vectorSize; ++i) {
+            flatVec->set(
+                i, static_cast<int64_t>(*firstRowId_) + batchStartPos + i);
+          }
+        } else {
+          // With deletions: use the bitmap to find actual file positions
+          // of surviving rows.
+          vector_size_t outputIdx = 0;
+          for (vector_size_t j = 0;
+               j < static_cast<vector_size_t>(actualSize) &&
+               outputIdx < vectorSize;
+               ++j) {
+            if (!bits::isBitSet(mutation.deletedRows, j)) {
               flatVec->set(
+                  outputIdx++,
+                  static_cast<int64_t>(*firstRowId_) + batchStartPos + j);
+            }
+          }
+        }
+        rowIdChild = flatVec;
+      } else if (rowIdChild->mayHaveNulls()) {
+        // Column is in the file but has some null values — replace nulls
+        // with first_row_id + _pos. Handle any vector encoding.
+        auto pool = connectorQueryCtx_->memoryPool();
+        auto* simpleVec = rowIdChild->as<SimpleVector<int64_t>>();
+        auto newFlat = BaseVector::create<FlatVector<int64_t>>(
+            BIGINT(), vectorSize, pool);
+        int64_t batchStartPos = splitOffset_ + baseReadOffset_;
+        if (mutation.deletedRows == nullptr) {
+          for (vector_size_t i = 0; i < vectorSize; ++i) {
+            if (simpleVec->isNullAt(i)) {
+              newFlat->set(
                   i, static_cast<int64_t>(*firstRowId_) + batchStartPos + i);
+            } else {
+              newFlat->set(i, simpleVec->valueAt(i));
             }
           }
         } else {
           vector_size_t outputIdx = 0;
           for (vector_size_t j = 0;
                j < static_cast<vector_size_t>(actualSize) &&
-               outputIdx < rowsScanned;
+               outputIdx < vectorSize;
                ++j) {
             if (!bits::isBitSet(mutation.deletedRows, j)) {
-              if (flatVec->isNullAt(outputIdx)) {
-                flatVec->set(
+              if (simpleVec->isNullAt(outputIdx)) {
+                newFlat->set(
                     outputIdx,
                     static_cast<int64_t>(*firstRowId_) + batchStartPos + j);
+              } else {
+                newFlat->set(outputIdx, simpleVec->valueAt(outputIdx));
               }
               ++outputIdx;
             }
           }
         }
+        rowIdChild = newFlat;
       }
     }
   }
