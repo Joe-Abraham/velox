@@ -113,12 +113,9 @@ class IcebergSplitReader : public SplitReader {
       positionalDeleteFileReaders_;
   BufferPtr deleteBitmap_;
 
-  // True if _last_updated_sequence_number is read from the data file (not set
-  // as a constant). Set in adaptColumns().
-  bool readLastUpdatedSeqNumFromFile_{false};
-
   // The child index of _last_updated_sequence_number in readerOutputType_.
-  // Used to locate the column in the output for null-value replacement.
+  // When set (along with dataSequenceNumber_), null values in this column
+  // are replaced with dataSequenceNumber_ during reads per the Iceberg spec.
   std::optional<column_index_t> lastUpdatedSeqNumOutputIndex_;
 
   // Data sequence number from the file's manifest entry, used to replace null
@@ -129,10 +126,9 @@ class IcebergSplitReader : public SplitReader {
   // When available (>= 0), _row_id = first_row_id + _pos for rows not in file.
   std::optional<int64_t> firstRowId_;
 
-  // True if _row_id should be computed as first_row_id + _pos in next().
-  bool computeRowId_{false};
-
   // The child index of _row_id in readerOutputType_.
+  // When set (along with firstRowId_), _row_id is computed as
+  // first_row_id + _pos for null values during reads per the Iceberg spec.
   std::optional<column_index_t> rowIdOutputIndex_;
 };
 } // namespace facebook::velox::connector::hive::iceberg
