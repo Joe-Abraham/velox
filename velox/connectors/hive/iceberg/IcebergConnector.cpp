@@ -43,7 +43,7 @@ IcebergConnector::IcebergConnector(
     const std::string& id,
     std::shared_ptr<const config::ConfigBase> config,
     folly::Executor* ioExecutor)
-    : HiveConnector(id, config, ioExecutor),
+    : HiveConnector(id, IcebergConfig::translateConfig(config), ioExecutor),
       icebergConfig_(std::make_shared<IcebergConfig>(connectorConfig())) {
   registerIcebergInternalFunctions(icebergConfig_->functionPrefix());
 }
