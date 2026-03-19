@@ -17,6 +17,7 @@
 #include "velox/connectors/hive/iceberg/IcebergConfig.h"
 
 #include "velox/common/config/Config.h"
+#include "velox/connectors/hive/HiveConfig.h"
 
 namespace facebook::velox::connector::hive::iceberg {
 
@@ -30,6 +31,42 @@ IcebergConfig::IcebergConfig(
 std::string IcebergConfig::functionPrefix() const {
   return config_->get<std::string>(
       kFunctionPrefixConfig, kDefaultFunctionPrefix);
+}
+
+// static
+std::shared_ptr<const config::ConfigBase> IcebergConfig::translateConfig(
+    const std::shared_ptr<const config::ConfigBase>& config) {
+  if (!config) {
+    return config;
+  }
+
+  // Map of Iceberg-specific property names to HiveConfig equivalents.
+  static const std::vector<std::pair<std::string, std::string>>
+      kPropertyTranslations = {
+          {kIcebergMaxPartitionsPerWriter, HiveConfig::kMaxPartitionsPerWriters},
+          {kIcebergTargetMaxFileSize, HiveConfig::kMaxTargetFileSize},
+      };
+
+  bool needsTranslation = false;
+  for (const auto& [icebergKey, hiveKey] : kPropertyTranslations) {
+    if (config->valueExists(icebergKey) && !config->valueExists(hiveKey)) {
+      needsTranslation = true;
+      break;
+    }
+  }
+
+  if (!needsTranslation) {
+    return config;
+  }
+
+  auto configMap = config->rawConfigsCopy();
+  for (const auto& [icebergKey, hiveKey] : kPropertyTranslations) {
+    auto it = configMap.find(icebergKey);
+    if (it != configMap.end() && configMap.find(hiveKey) == configMap.end()) {
+      configMap[hiveKey] = it->second;
+    }
+  }
+  return std::make_shared<config::ConfigBase>(std::move(configMap));
 }
 
 } // namespace facebook::velox::connector::hive::iceberg

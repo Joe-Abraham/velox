@@ -72,6 +72,9 @@ class IcebergConnectorFactory final : public ConnectorFactory {
 
   IcebergConnectorFactory() : ConnectorFactory(kIcebergConnectorName) {}
 
+  explicit IcebergConnectorFactory(const char* connectorName)
+      : ConnectorFactory(connectorName) {}
+
   /// Creates a new IcebergConnector instance.
   ///
   /// @param id Unique identifier for this connector instance (typically the

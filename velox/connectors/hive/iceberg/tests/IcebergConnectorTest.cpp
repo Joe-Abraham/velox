@@ -17,6 +17,7 @@
 #include "velox/connectors/hive/iceberg/IcebergConnector.h"
 #include <gtest/gtest.h>
 #include "velox/connectors/hive/HiveConfig.h"
+#include "velox/connectors/hive/iceberg/IcebergConfig.h"
 #include "velox/connectors/hive/iceberg/tests/IcebergTestBase.h"
 
 namespace facebook::velox::connector::hive::iceberg {
@@ -63,6 +64,71 @@ TEST_F(IcebergConnectorTest, connectorProperties) {
   ASSERT_TRUE(icebergConnector->canAddDynamicFilter());
   ASSERT_TRUE(icebergConnector->supportsSplitPreload());
   ASSERT_NE(icebergConnector->ioExecutor(), nullptr);
+}
+
+TEST_F(IcebergConnectorTest, icebergPropertyTranslation) {
+  // Configure using Iceberg-specific property names (as used by Presto
+  // coordinator). These should be translated to HiveConfig equivalents.
+  auto icebergConfig = std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{
+          {IcebergConfig::kIcebergMaxPartitionsPerWriter, "2500"},
+          {IcebergConfig::kIcebergTargetMaxFileSize, "512MB"}});
+
+  resetIcebergConnector(icebergConfig);
+
+  auto icebergConnector = getConnector(test::kIcebergConnectorId);
+  ASSERT_NE(icebergConnector, nullptr);
+
+  auto config = icebergConnector->connectorConfig();
+  ASSERT_NE(config, nullptr);
+
+  // The Iceberg property names should have been translated to HiveConfig
+  // equivalents.
+  hive::HiveConfig hiveConfig(config);
+  auto emptySession = std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>());
+  ASSERT_EQ(hiveConfig.maxPartitionsPerWriters(emptySession.get()), 2500);
+  ASSERT_EQ(
+      hiveConfig.maxTargetFileSizeBytes(emptySession.get()),
+      512UL * 1024 * 1024);
+}
+
+TEST_F(IcebergConnectorTest, hivePropertyNamesPreferred) {
+  // When both Iceberg and HiveConfig property names are set, the HiveConfig
+  // names take precedence (they are not overwritten by translation).
+  auto config = std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>{
+          {IcebergConfig::kIcebergMaxPartitionsPerWriter, "2500"},
+          {hive::HiveConfig::kMaxPartitionsPerWriters, "100"},
+          {IcebergConfig::kIcebergTargetMaxFileSize, "512MB"},
+          {hive::HiveConfig::kMaxTargetFileSize, "1GB"}});
+
+  resetIcebergConnector(config);
+
+  auto icebergConnector = getConnector(test::kIcebergConnectorId);
+  auto connConfig = icebergConnector->connectorConfig();
+
+  hive::HiveConfig hiveConfig(connConfig);
+  auto emptySession = std::make_shared<config::ConfigBase>(
+      std::unordered_map<std::string, std::string>());
+  // HiveConfig property names should take precedence.
+  ASSERT_EQ(hiveConfig.maxPartitionsPerWriters(emptySession.get()), 100);
+  ASSERT_EQ(
+      hiveConfig.maxTargetFileSizeBytes(emptySession.get()),
+      1024UL * 1024 * 1024);
+}
+
+TEST_F(IcebergConnectorTest, customConnectorName) {
+  // Verify that IcebergConnectorFactory supports a custom connector name.
+  IcebergConnectorFactory customFactory("custom-iceberg");
+  ASSERT_EQ(customFactory.connectorName(), "custom-iceberg");
+
+  auto connector = customFactory.newConnector(
+      "custom-catalog-id",
+      std::make_shared<config::ConfigBase>(
+          std::unordered_map<std::string, std::string>()));
+  ASSERT_NE(connector, nullptr);
+  ASSERT_EQ(connector->connectorId(), "custom-catalog-id");
 }
 
 } // namespace

@@ -35,6 +35,15 @@ class IcebergConfig {
   /// connector config override is provided.
   static constexpr const char* kDefaultFunctionPrefix = "$internal$.iceberg.";
 
+  /// Iceberg-specific property names used by the Presto coordinator.
+  /// These are translated to HiveConfig equivalents when an IcebergConnector
+  /// is created, so that either naming convention can be used in the catalog
+  /// properties file.
+  static constexpr const char* kIcebergMaxPartitionsPerWriter =
+      "iceberg.max-partitions-per-writer";
+  static constexpr const char* kIcebergTargetMaxFileSize =
+      "iceberg.target-max-file-size";
+
   explicit IcebergConfig(
       const std::shared_ptr<const config::ConfigBase>& config);
 
@@ -43,6 +52,15 @@ class IcebergConfig {
   }
 
   std::string functionPrefix() const;
+
+  /// Translates Iceberg-specific property names to HiveConfig equivalents.
+  /// If an Iceberg property is present and the corresponding HiveConfig
+  /// property is not, the Iceberg property value is copied under the
+  /// HiveConfig key. This allows users to configure Iceberg catalogs
+  /// using either the Presto coordinator property names or the Velox worker
+  /// property names.
+  static std::shared_ptr<const config::ConfigBase> translateConfig(
+      const std::shared_ptr<const config::ConfigBase>& config);
 
  private:
   const std::shared_ptr<const config::ConfigBase> config_;
