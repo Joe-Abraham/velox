@@ -23,6 +23,7 @@
 #include "velox/connectors/hive/iceberg/IcebergMetadataColumns.h"
 #include "velox/connectors/hive/iceberg/IcebergSplit.h"
 #include "velox/dwio/common/BufferUtil.h"
+#include "velox/vector/DecodedVector.h"
 
 using namespace facebook::velox::dwio::common;
 
@@ -61,11 +62,63 @@ void IcebergSplitReader::prepareSplit(
     std::shared_ptr<common::MetadataFilter> metadataFilter,
     dwio::common::RuntimeStatistics& runtimeStats,
     const folly::F14FastMap<std::string, std::string>& fileReadOps) {
+  auto fileSchema = baseReaderOpts_.fileSchema();
+  if (fileSchema) {
+    auto names = fileSchema->names();
+    auto types = fileSchema->children();
+    bool modified = false;
+    for (const auto* colName :
+         {IcebergMetadataColumn::kRowIdColumnName,
+          IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName}) {
+      if (readerOutputType_->containsChild(colName) &&
+          !fileSchema->containsChild(colName)) {
+        names.push_back(std::string(colName));
+        types.push_back(BIGINT());
+        modified = true;
+      }
+    }
+    if (modified) {
+      baseReaderOpts_.setFileSchema(ROW(std::move(names), std::move(types)));
+    }
+  }
+
   createReader();
   if (emptySplit_) {
     return;
   }
+
+  firstRowId_ = std::nullopt;
+  if (auto it = icebergSplit_->infoColumns.find("$first_row_id");
+      it != icebergSplit_->infoColumns.end()) {
+    auto value = folly::to<int64_t>(it->second);
+    if (value >= 0) {
+      firstRowId_ = value;
+    }
+  }
+
+  dataSequenceNumber_ = std::nullopt;
+  if (auto it = icebergSplit_->infoColumns.find("$data_sequence_number");
+      it != icebergSplit_->infoColumns.end()) {
+    dataSequenceNumber_ = folly::to<int64_t>(it->second);
+  }
+
   auto rowType = getAdaptedRowType();
+
+  lastUpdatedSeqNumOutputIndex_ = std::nullopt;
+  if (dataSequenceNumber_.has_value()) {
+    auto* seqNumSpec = scanSpec_->childByName(
+        IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName);
+    if (seqNumSpec && !seqNumSpec->isConstant()) {
+      lastUpdatedSeqNumOutputIndex_ = readerOutputType_->getChildIdxIfExists(
+          IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName);
+    }
+  }
+
+  rowIdOutputIndex_ = std::nullopt;
+  if (firstRowId_.has_value()) {
+    rowIdOutputIndex_ = readerOutputType_->getChildIdxIfExists(
+        IcebergMetadataColumn::kRowIdColumnName);
+  }
 
   if (checkIfSplitIsEmpty(runtimeStats)) {
     VELOX_CHECK(emptySplit_);
@@ -160,6 +213,117 @@ uint64_t IcebergSplitReader::next(uint64_t size, VectorPtr& output) {
 
   auto rowsScanned = baseRowReader_->next(actualSize, output, &mutation);
 
+  auto* pool = connectorQueryCtx_->memoryPool();
+
+  if (lastUpdatedSeqNumOutputIndex_.has_value() &&
+      dataSequenceNumber_.has_value() && rowsScanned > 0) {
+    auto* rowOutput = output->as<RowVector>();
+    if (rowOutput) {
+      auto& seqNumChild = rowOutput->childAt(*lastUpdatedSeqNumOutputIndex_);
+      seqNumChild = BaseVector::loadedVectorShared(seqNumChild);
+      auto vectorSize = seqNumChild->size();
+
+      if (vectorSize > 0 && seqNumChild->isConstantEncoding() &&
+          seqNumChild->isNullAt(0)) {
+        seqNumChild = std::make_shared<ConstantVector<int64_t>>(
+            pool,
+            vectorSize,
+            false,
+            BIGINT(),
+            static_cast<int64_t>(*dataSequenceNumber_));
+      } else if (vectorSize > 0 && seqNumChild->mayHaveNulls()) {
+        DecodedVector decoded(*seqNumChild);
+        if (decoded.mayHaveNulls()) {
+          auto newFlat = BaseVector::create<FlatVector<int64_t>>(
+              BIGINT(), vectorSize, pool);
+          for (vector_size_t i = 0; i < vectorSize; ++i) {
+            if (decoded.isNullAt(i)) {
+              newFlat->set(i, *dataSequenceNumber_);
+            } else {
+              newFlat->set(i, decoded.valueAt<int64_t>(i));
+            }
+          }
+          seqNumChild = newFlat;
+        }
+      }
+    }
+  }
+
+  if (rowIdOutputIndex_.has_value() && firstRowId_.has_value() &&
+      rowsScanned > 0) {
+    const bool canComputeFilePositions =
+        !scanSpec_->hasFilter() && mutation.randomSkip == nullptr;
+    auto* rowOutput = output->as<RowVector>();
+    if (rowOutput) {
+      auto& rowIdChild = rowOutput->childAt(*rowIdOutputIndex_);
+      rowIdChild = BaseVector::loadedVectorShared(rowIdChild);
+      auto vectorSize = rowIdChild->size();
+
+      if (vectorSize > 0 && rowIdChild->isConstantEncoding() &&
+          rowIdChild->isNullAt(0) && canComputeFilePositions) {
+        auto flatVec =
+            BaseVector::create<FlatVector<int64_t>>(BIGINT(), vectorSize, pool);
+        int64_t batchStartPos = splitOffset_ + baseReadOffset_;
+        if (mutation.deletedRows == nullptr) {
+          for (vector_size_t i = 0; i < vectorSize; ++i) {
+            flatVec->set(
+                i, static_cast<int64_t>(*firstRowId_) + batchStartPos + i);
+          }
+        } else {
+          vector_size_t outputIdx = 0;
+          for (vector_size_t j = 0;
+               j < static_cast<vector_size_t>(actualSize) &&
+               outputIdx < vectorSize;
+               ++j) {
+            if (!bits::isBitSet(mutation.deletedRows, j)) {
+              flatVec->set(
+                  outputIdx++,
+                  static_cast<int64_t>(*firstRowId_) + batchStartPos + j);
+            }
+          }
+        }
+        rowIdChild = flatVec;
+      } else if (
+          vectorSize > 0 && rowIdChild->mayHaveNulls() &&
+          canComputeFilePositions) {
+        DecodedVector decoded(*rowIdChild);
+        if (decoded.mayHaveNulls()) {
+          auto newFlat = BaseVector::create<FlatVector<int64_t>>(
+              BIGINT(), vectorSize, pool);
+          int64_t batchStartPos = splitOffset_ + baseReadOffset_;
+          if (mutation.deletedRows == nullptr) {
+            for (vector_size_t i = 0; i < vectorSize; ++i) {
+              if (decoded.isNullAt(i)) {
+                newFlat->set(
+                    i, static_cast<int64_t>(*firstRowId_) + batchStartPos + i);
+              } else {
+                newFlat->set(i, decoded.valueAt<int64_t>(i));
+              }
+            }
+          } else {
+            vector_size_t outputIdx = 0;
+            for (vector_size_t j = 0;
+                 j < static_cast<vector_size_t>(actualSize) &&
+                 outputIdx < vectorSize;
+                 ++j) {
+              if (!bits::isBitSet(mutation.deletedRows, j)) {
+                if (decoded.isNullAt(outputIdx)) {
+                  newFlat->set(
+                      outputIdx,
+                      static_cast<int64_t>(*firstRowId_) + batchStartPos + j);
+                } else {
+                  newFlat->set(outputIdx, decoded.valueAt<int64_t>(outputIdx));
+                }
+                ++outputIdx;
+              }
+            }
+          }
+          rowIdChild = newFlat;
+        }
+      }
+    }
+  }
+
   return rowsScanned;
 }
 
@@ -198,15 +362,34 @@ std::vector<TypePtr> IcebergSplitReader::adaptColumns(
         // files, partition column values are stored in partition metadata
         // rather than in the data file itself, following Hive's partitioning
         // convention.
-        auto partitionIt = fileSplit_->partitionKeys.find(fieldName);
-        if (partitionIt != fileSplit_->partitionKeys.end()) {
-          setPartitionValue(childSpec.get(), fieldName, partitionIt->second);
+        // 3. _last_updated_sequence_number: For Iceberg V3 row lineage, if
+        // the column is not in the file, inherit the data sequence number
+        // from the file's manifest entry.
+        // 4. _row_id: For Iceberg V3 row lineage, if the column is not in
+        // the file, set as NULL constant here. When first_row_id is
+        // available, next() will replace NULL with first_row_id + _pos.
+        if (auto it = fileSplit_->partitionKeys.find(fieldName);
+            it != fileSplit_->partitionKeys.end()) {
+          setPartitionValue(childSpec.get(), fieldName, it->second);
+        } else if (
+            fieldName ==
+                IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName &&
+            dataSequenceNumber_.has_value()) {
+          childSpec->setConstantValue(
+              std::make_shared<ConstantVector<int64_t>>(
+                  connectorQueryCtx_->memoryPool(),
+                  1,
+                  false,
+                  BIGINT(),
+                  static_cast<int64_t>(*dataSequenceNumber_)));
         } else {
+          auto outputIdx = readerOutputType_->getChildIdxIfExists(fieldName);
+          auto colType = outputIdx.has_value()
+              ? readerOutputType_->childAt(*outputIdx)
+              : tableSchema->findChild(fieldName);
           childSpec->setConstantValue(
               BaseVector::createNullConstant(
-                  tableSchema->findChild(fieldName),
-                  1,
-                  connectorQueryCtx_->memoryPool()));
+                  colType, 1, connectorQueryCtx_->memoryPool()));
         }
       }
     }
