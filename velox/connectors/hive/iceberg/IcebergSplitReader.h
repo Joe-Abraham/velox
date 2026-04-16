@@ -112,6 +112,7 @@ class IcebergSplitReader : public FileSplitReader {
   uint64_t baseReadOffset_;
   // The file position for the first row in the split
   uint64_t splitOffset_;
+  // Active readers for positional delete files associated with this split.
   std::list<std::unique_ptr<PositionalDeleteFileReader>>
       positionalDeleteFileReaders_;
   // Bitmap of deleted rows in the current batch; set bits mark deleted rows.

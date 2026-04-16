@@ -16,7 +16,8 @@
 
 #include <folly/Singleton.h>
 #include <folly/lang/Bits.h>
-#include "velox/common/base/tests/GTestUtils.h"
+#include <filesystem>
+
 #include "velox/common/encode/Base64.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/connectors/ConnectorRegistry.h"
@@ -243,8 +244,7 @@ class HiveIcebergTest : public HiveConnectorTestBase {
               deleteFilePath,
               fileFormat_,
               deleteFilePaths[deleteFileName].first,
-              testing::internal::GetFileSize(
-                  std::fopen(deleteFilePath.c_str(), "r")));
+              std::filesystem::file_size(deleteFilePath));
           deleteFiles.push_back(icebergDeleteFile);
         }
       }
@@ -357,8 +357,7 @@ class HiveIcebergTest : public HiveConnectorTestBase {
         deleteFilePath->getPath(),
         fileFormat_,
         deletedPositionSize,
-        testing::internal::GetFileSize(
-            std::fopen(deleteFilePath->getPath().c_str(), "r")));
+        std::filesystem::file_size(deleteFilePath->getPath()));
     auto fileSize = filesystems::getFileSystem(path, nullptr)
                         ->openFileForRead(path)
                         ->size();
@@ -935,8 +934,7 @@ TEST_F(HiveIcebergTest, skipDeleteFileByPositionUpperBound) {
       deleteFilePath->getPath(),
       FileFormat::DWRF,
       3,
-      testing::internal::GetFileSize(
-          std::fopen(deleteFilePath->getPath().c_str(), "r")),
+      std::filesystem::file_size(deleteFilePath->getPath()),
       {},
       {},
       {{posColumn->id, encodedUpperBound}});
@@ -1050,7 +1048,7 @@ TEST_F(HiveIcebergTest, readRowIdColumn) {
   AssertQueryBuilder(plan).splits(icebergSplits).assertResults(expected);
 }
 
-TEST_F(HiveIcebergTest, readRowIdColumnMissing) {
+TEST_F(HiveIcebergTest, readRowIdColumnComputedFromFirstRowId) {
   folly::SingletonVault::singleton()->registrationComplete();
 
   std::vector<RowVectorPtr> dataVectors;
@@ -1132,8 +1130,7 @@ TEST_F(HiveIcebergTest, readRowIdColumnComputedWithDeletes) {
       deleteFilePath->getPath(),
       fileFormat_,
       2,
-      testing::internal::GetFileSize(
-          std::fopen(deleteFilePath->getPath().c_str(), "r")),
+      std::filesystem::file_size(deleteFilePath->getPath()),
       {},
       {},
       {{posColumn->id, encodedUpperBound}});
@@ -1433,16 +1430,19 @@ TEST_F(HiveIcebergTest, readLastUpdatedSequenceNumberMixedWithDeletes) {
   auto dataFilePath = TempFilePath::create();
   writeToFile(dataFilePath->getPath(), dataVectors);
 
-  // Create a positional delete file deleting rows at positions 1 and 3.
+  // Delete rows at positions 0 and 2, leaving positions 1 (seq=5), 3
+  // (seq=10), and 4 (seq=null) as survivors. This tests that non-null values
+  // are preserved after deletes, and null values are replaced by the inherited
+  // data sequence number.
   auto deleteFilePath = TempFilePath::create();
   std::vector<RowVectorPtr> deleteVectors = {makeRowVector(
       {pathColumn->name, posColumn->name},
       {makeFlatVector<std::string>(
            2, [&](auto) { return dataFilePath->getPath(); }),
-       makeFlatVector<int64_t>({1, 3})})};
+       makeFlatVector<int64_t>({0, 2})})};
   writeToFile(deleteFilePath->getPath(), deleteVectors);
 
-  uint64_t upperBound = 3;
+  uint64_t upperBound = 2;
   auto upperBoundLE = folly::Endian::little(upperBound);
   auto encodedUpperBound = encoding::Base64::encode(
       std::string_view(
@@ -1453,8 +1453,7 @@ TEST_F(HiveIcebergTest, readLastUpdatedSequenceNumberMixedWithDeletes) {
       deleteFilePath->getPath(),
       fileFormat_,
       2,
-      testing::internal::GetFileSize(
-          std::fopen(deleteFilePath->getPath().c_str(), "r")),
+      std::filesystem::file_size(deleteFilePath->getPath()),
       {},
       {},
       {{posColumn->id, encodedUpperBound}});
@@ -1488,17 +1487,17 @@ TEST_F(HiveIcebergTest, readLastUpdatedSequenceNumberMixedWithDeletes) {
                   .endTableScan()
                   .planNode();
 
-  // After deletes (positions 1,3 removed), surviving rows are at positions
-  // 0, 2, 4. Their _last_updated_sequence_number values:
-  //   pos 0: null → 42 (replaced with data_sequence_number)
-  //   pos 2: null → 42 (replaced with data_sequence_number)
+  // After deletes (positions 0,2 removed), surviving rows are at positions
+  // 1, 3, 4. Their _last_updated_sequence_number values:
+  //   pos 1: 5    → 5  (non-null value preserved)
+  //   pos 3: 10   → 10 (non-null value preserved)
   //   pos 4: null → 42 (replaced with data_sequence_number)
   std::vector<RowVectorPtr> expected;
   expected.push_back(makeRowVector(
       outputType->names(),
       {
-          makeFlatVector<int64_t>({10, 30, 50}),
-          makeFlatVector<int64_t>({42, 42, 42}),
+          makeFlatVector<int64_t>({20, 40, 50}),
+          makeFlatVector<int64_t>({5, 10, 42}),
       }));
 
   AssertQueryBuilder(plan).splits({split}).assertResults(expected);

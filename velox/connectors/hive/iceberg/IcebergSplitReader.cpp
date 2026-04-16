@@ -16,6 +16,7 @@
 
 #include "velox/connectors/hive/iceberg/IcebergSplitReader.h"
 
+#include <folly/ScopeGuard.h>
 #include <folly/lang/Bits.h>
 
 #include "velox/common/encode/Base64.h"
@@ -107,33 +108,36 @@ void IcebergSplitReader::prepareSplit(
     const folly::F14FastMap<std::string, std::string>& fileReadOps) {
   // Temporarily extend the file schema with projected row-lineage columns
   // (_row_id, _last_updated_sequence_number) so the reader allocates output
-  // slots for them. Restored after createReader() to avoid persisting across
-  // splits.
-  auto originalFileSchema = baseReaderOpts_.fileSchema();
-  if (originalFileSchema) {
-    auto names = originalFileSchema->names();
-    auto types = originalFileSchema->children();
-    bool modified = false;
-    for (const auto* colName :
-         {IcebergMetadataColumn::kRowIdColumnName,
-          IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName}) {
-      if (readerOutputType_->containsChild(colName) &&
-          !originalFileSchema->containsChild(colName)) {
-        names.push_back(std::string(colName));
-        types.push_back(BIGINT());
-        modified = true;
+  // slots for them. Scoped to createReader() so getAdaptedRowType() sees the
+  // original schema.
+  {
+    auto originalFileSchema = baseReaderOpts_.fileSchema();
+    auto restorer = folly::makeGuard([&] {
+      if (originalFileSchema) {
+        baseReaderOpts_.setFileSchema(originalFileSchema);
+      }
+    });
+    if (originalFileSchema) {
+      auto names = originalFileSchema->names();
+      auto types = originalFileSchema->children();
+      bool modified = false;
+      for (const auto* colName :
+           {IcebergMetadataColumn::kRowIdColumnName,
+            IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName}) {
+        if (readerOutputType_->containsChild(colName) &&
+            !originalFileSchema->containsChild(colName)) {
+          names.push_back(std::string(colName));
+          types.push_back(BIGINT());
+          modified = true;
+        }
+      }
+      if (modified) {
+        baseReaderOpts_.setFileSchema(ROW(std::move(names), std::move(types)));
       }
     }
-    if (modified) {
-      baseReaderOpts_.setFileSchema(ROW(std::move(names), std::move(types)));
-    }
+    createReader(fileReadOps);
   }
 
-  createReader(fileReadOps);
-
-  if (originalFileSchema) {
-    baseReaderOpts_.setFileSchema(originalFileSchema);
-  }
   if (emptySplit_) {
     return;
   }
@@ -142,7 +146,13 @@ void IcebergSplitReader::prepareSplit(
   if (auto it = icebergSplit_->infoColumns.find(
           IcebergMetadataColumn::kFirstRowIdInfoColumn);
       it != icebergSplit_->infoColumns.end()) {
-    auto value = folly::to<int64_t>(it->second);
+    int64_t value;
+    try {
+      value = folly::to<int64_t>(it->second);
+    } catch (const folly::ConversionError&) {
+      VELOX_FAIL(
+          "Invalid $first_row_id value in split info columns: {}", it->second);
+    }
     VELOX_CHECK_GE(value, 0, "First row ID must be non-negative");
     firstRowId_ = value;
   }
@@ -151,7 +161,13 @@ void IcebergSplitReader::prepareSplit(
   if (auto it = icebergSplit_->infoColumns.find(
           IcebergMetadataColumn::kDataSequenceNumberInfoColumn);
       it != icebergSplit_->infoColumns.end()) {
-    dataSequenceNumber_ = folly::to<int64_t>(it->second);
+    try {
+      dataSequenceNumber_ = folly::to<int64_t>(it->second);
+    } catch (const folly::ConversionError&) {
+      VELOX_FAIL(
+          "Invalid $data_sequence_number value in split info columns: {}",
+          it->second);
+    }
   }
 
   // getAdaptedRowType() calls adaptColumns(), which may set
@@ -293,41 +309,40 @@ uint64_t IcebergSplitReader::next(uint64_t size, VectorPtr& output) {
 
   auto* pool = connectorQueryCtx_->memoryPool();
 
-  if (lastUpdatedSeqNumOutputIndex_.has_value() &&
-      dataSequenceNumber_.has_value() && rowsScanned > 0) {
-    if (auto* rowOutput = output->as<RowVector>()) {
+  if (rowsScanned > 0 &&
+      (lastUpdatedSeqNumOutputIndex_.has_value() ||
+       rowIdOutputIndex_.has_value())) {
+    auto* rowOutput = output->as<RowVector>();
+    VELOX_DCHECK_NOT_NULL(
+        rowOutput, "Expected RowVector output from table scan");
+
+    if (lastUpdatedSeqNumOutputIndex_.has_value() &&
+        dataSequenceNumber_.has_value()) {
       auto& seqNumChild = rowOutput->childAt(*lastUpdatedSeqNumOutputIndex_);
       const int64_t seqNum = static_cast<int64_t>(*dataSequenceNumber_);
       fillNullsWithInt64(
           seqNumChild, pool, [seqNum](vector_size_t) { return seqNum; });
     }
-  }
 
-  if (rowIdOutputIndex_.has_value() && firstRowId_.has_value() &&
-      rowsScanned > 0) {
-    if (auto* rowOutput = output->as<RowVector>()) {
+    if (rowIdOutputIndex_.has_value() && firstRowId_.has_value()) {
       auto& rowIdChild = rowOutput->childAt(*rowIdOutputIndex_);
       if (useRowNumberColumn_) {
         // Use the injected row-number column for file-absolute positions.
-        const column_index_t rowNumIdx =
-            baseRowReaderOpts_.rowNumberColumnInfo()->insertPosition;
-        const DecodedVector decodedRowNums(*rowOutput->childAt(rowNumIdx));
+        // The row-number column is always appended last (at index
+        // readerOutputType_->size()).
+        const DecodedVector decodedRowNums(
+            *rowOutput->childAt(readerOutputType_->size()));
         const int64_t firstRowId = static_cast<int64_t>(*firstRowId_);
         fillNullsWithInt64(rowIdChild, pool, [&](vector_size_t i) {
           return firstRowId + decodedRowNums.valueAt<int64_t>(i);
         });
 
-        // Strip the injected row-number column from the output.
-        auto& rowType = rowOutput->type()->asRow();
-        auto names = rowType.names();
-        auto types = rowType.children();
+        // Strip the injected row-number column (always last) from the output.
         auto children = rowOutput->children();
-        names.erase(names.begin() + rowNumIdx);
-        types.erase(types.begin() + rowNumIdx);
-        children.erase(children.begin() + rowNumIdx);
+        children.pop_back();
         output = std::make_shared<RowVector>(
             rowOutput->pool(),
-            ROW(std::move(names), std::move(types)),
+            readerOutputType_,
             rowOutput->nulls(),
             rowOutput->size(),
             std::move(children));
