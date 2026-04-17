@@ -18,6 +18,8 @@
 
 #include "velox/connectors/Connector.h"
 #include "velox/connectors/hive/FileSplitReader.h"
+#include "velox/connectors/hive/iceberg/DeletionVectorReader.h"
+#include "velox/connectors/hive/iceberg/EqualityDeleteFileReader.h"
 #include "velox/connectors/hive/iceberg/PositionalDeleteFileReader.h"
 
 namespace facebook::velox::connector::hive::iceberg {
@@ -107,10 +109,10 @@ class IcebergSplitReader : public FileSplitReader {
 
   const std::shared_ptr<const HiveIcebergSplit> icebergSplit_;
 
-  // The read offset to the beginning of the split in number of rows for the
-  // current batch for the base data file
+  /// Read offset to the beginning of the split in number of rows for the
+  /// current batch for the base data file.
   uint64_t baseReadOffset_;
-  // The file position for the first row in the split
+  /// File position for the first row in the split.
   uint64_t splitOffset_;
   // Active readers for positional delete files associated with this split.
   std::list<std::unique_ptr<PositionalDeleteFileReader>>
@@ -132,5 +134,12 @@ class IcebergSplitReader : public FileSplitReader {
   // (set when filters, random-skip, or positional deletes make output
   // positions non-contiguous).
   bool useRowNumberColumn_{false};
+
+  /// Readers for Iceberg V3 deletion vectors (Puffin-encoded roaring bitmaps).
+  std::list<std::unique_ptr<DeletionVectorReader>> deletionVectorReaders_;
+
+  /// Readers for equality delete files.
+  std::list<std::unique_ptr<EqualityDeleteFileReader>>
+      equalityDeleteFileReaders_;
 };
 } // namespace facebook::velox::connector::hive::iceberg
