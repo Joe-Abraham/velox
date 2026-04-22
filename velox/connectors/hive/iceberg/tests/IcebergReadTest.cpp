@@ -16,7 +16,7 @@
 
 #include <folly/Singleton.h>
 #include <folly/lang/Bits.h>
-#include "velox/common/base/tests/GTestUtils.h"
+
 #include "velox/common/encode/Base64.h"
 #include "velox/common/file/FileSystems.h"
 #include "velox/connectors/ConnectorRegistry.h"
@@ -250,7 +250,7 @@ class HiveIcebergTest : public HiveConnectorTestBase {
           IcebergDeleteFile icebergDeleteFile(
               FileContent::kPositionalDeletes,
               deleteFilePath,
-              fileFomat_,
+              fileFormat_,
               deleteFilePaths[deleteFileName].first,
               getTestFileSize(deleteFilePath));
           deleteFiles.push_back(icebergDeleteFile);
@@ -284,6 +284,7 @@ class HiveIcebergTest : public HiveConnectorTestBase {
  protected:
   std::shared_ptr<dwrf::Config> config_;
   std::function<std::unique_ptr<dwrf::DWRFFlushPolicy>()> flushPolicyFactory_;
+  FileFormat fileFormat_{FileFormat::DWRF};
 
   std::vector<std::shared_ptr<ConnectorSplit>> makeIcebergSplits(
       const std::string& dataFilePath,
@@ -304,7 +305,7 @@ class HiveIcebergTest : public HiveConnectorTestBase {
           std::make_shared<HiveIcebergSplit>(
               kIcebergConnectorId,
               dataFilePath,
-              fileFomat_,
+              fileFormat_,
               i * splitSize,
               splitSize,
               partitionKeys,
@@ -362,7 +363,7 @@ class HiveIcebergTest : public HiveConnectorTestBase {
     IcebergDeleteFile icebergDeleteFile(
         FileContent::kPositionalDeletes,
         deleteFilePath->getPath(),
-        fileFomat_,
+        fileFormat_,
         deletedPositionSize,
         getTestFileSize(deleteFilePath->getPath()));
     auto fileSize = filesystems::getFileSystem(path, nullptr)
@@ -373,7 +374,7 @@ class HiveIcebergTest : public HiveConnectorTestBase {
     return {std::make_shared<HiveIcebergSplit>(
         kIcebergConnectorId,
         path,
-        dwio::common::FileFormat::PARQUET,
+        FileFormat::PARQUET,
         0,
         fileSize,
         partitionKeys,
@@ -586,8 +587,6 @@ class HiveIcebergTest : public HiveConnectorTestBase {
 
     return deletePositionVector;
   }
-
-  dwio::common::FileFormat fileFomat_{dwio::common::FileFormat::DWRF};
 
   std::shared_ptr<IcebergMetadataColumn> pathColumn_ =
       IcebergMetadataColumn::icebergDeleteFilePathColumn();
@@ -941,7 +940,7 @@ TEST_F(HiveIcebergTest, skipDeleteFileByPositionUpperBound) {
   IcebergDeleteFile deleteFile(
       FileContent::kPositionalDeletes,
       deleteFilePath->getPath(),
-      dwio::common::FileFormat::DWRF,
+      FileFormat::DWRF,
       3,
       getTestFileSize(deleteFilePath->getPath()),
       {},
@@ -965,7 +964,7 @@ TEST_F(HiveIcebergTest, skipDeleteFileByPositionUpperBound) {
   auto split = std::make_shared<HiveIcebergSplit>(
       kIcebergConnectorId,
       dataFilePath->getPath(),
-      dwio::common::FileFormat::DWRF,
+      FileFormat::DWRF,
       static_cast<uint64_t>(fileSize / 2),
       static_cast<uint64_t>(fileSize / 2),
       std::unordered_map<std::string, std::optional<std::string>>{},
@@ -979,6 +978,537 @@ TEST_F(HiveIcebergTest, skipDeleteFileByPositionUpperBound) {
   createDuckDbTable({makeRowVector(
       {makeFlatVector<int64_t>(makeContinuousIncreasingValues(50, 50))})});
   assertQuery(plan, {split}, "SELECT * FROM tmp", 0);
+}
+
+// Verifies that projecting _row_id from a pre-V3 file (no _row_id column and
+// no $first_row_id info column) returns NULL for all rows.
+TEST_F(HiveIcebergTest, readRowIdColumnNoFirstRowId) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  std::vector<RowVectorPtr> dataVectors;
+  dataVectors.push_back(makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3}),
+  }));
+  auto dataFilePath = TempFilePath::create();
+  writeToFile(dataFilePath->getPath(), dataVectors);
+
+  // No infoColumns — simulates a pre-V3 split without $first_row_id.
+  auto icebergSplits = makeIcebergSplits(dataFilePath->getPath());
+
+  auto tableDataColumns = ROW({"c0"}, {BIGINT()});
+  auto outputType = ROW({"c0", "_row_id"}, {BIGINT(), BIGINT()});
+  auto plan = PlanBuilder()
+                  .startTableScan()
+                  .connectorId(kIcebergConnectorId)
+                  .outputType(outputType)
+                  .dataColumns(tableDataColumns)
+                  .endTableScan()
+                  .planNode();
+
+  std::vector<RowVectorPtr> expected;
+  expected.push_back(makeRowVector(
+      outputType->names(),
+      {
+          makeFlatVector<int64_t>({1, 2, 3}),
+          makeNullableFlatVector<int64_t>(
+              {std::nullopt, std::nullopt, std::nullopt}),
+      }));
+
+  AssertQueryBuilder(plan).splits(icebergSplits).assertResults(expected);
+}
+
+TEST_F(HiveIcebergTest, readRowIdColumn) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  auto fileRowType = ROW({"c0", "_row_id"}, {BIGINT(), BIGINT()});
+
+  // Write data file with c0 and _row_id columns.
+  std::vector<RowVectorPtr> dataVectors;
+  dataVectors.push_back(makeRowVector(
+      fileRowType->names(),
+      {
+          makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
+          makeFlatVector<int64_t>({100, 101, 102, 103, 104}),
+      }));
+  auto dataFilePath = TempFilePath::create();
+  writeToFile(dataFilePath->getPath(), dataVectors);
+
+  auto icebergSplits = makeIcebergSplits(dataFilePath->getPath());
+
+  auto tableDataColumns = ROW({"c0"}, {BIGINT()});
+  auto outputType = ROW({"c0", "_row_id"}, {BIGINT(), BIGINT()});
+  auto plan = PlanBuilder()
+                  .startTableScan()
+                  .connectorId(kIcebergConnectorId)
+                  .outputType(outputType)
+                  .dataColumns(tableDataColumns)
+                  .endTableScan()
+                  .planNode();
+
+  std::vector<RowVectorPtr> expected;
+  expected.push_back(makeRowVector(
+      outputType->names(),
+      {
+          makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
+          makeFlatVector<int64_t>({100, 101, 102, 103, 104}),
+      }));
+
+  AssertQueryBuilder(plan).splits(icebergSplits).assertResults(expected);
+}
+
+TEST_F(HiveIcebergTest, readRowIdColumnComputedFromFirstRowId) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  std::vector<RowVectorPtr> dataVectors;
+  dataVectors.push_back(makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3}),
+  }));
+  auto dataFilePath = TempFilePath::create();
+  writeToFile(dataFilePath->getPath(), dataVectors);
+
+  auto file = filesystems::getFileSystem(dataFilePath->getPath(), nullptr)
+                  ->openFileForRead(dataFilePath->getPath());
+  std::unordered_map<std::string, std::string> infoColumns = {
+      {IcebergMetadataColumn::kFirstRowIdInfoColumn, "100"}};
+  auto split = std::make_shared<HiveIcebergSplit>(
+      kIcebergConnectorId,
+      dataFilePath->getPath(),
+      fileFormat_,
+      0,
+      file->size(),
+      std::unordered_map<std::string, std::optional<std::string>>{},
+      std::nullopt,
+      std::unordered_map<std::string, std::string>{},
+      nullptr,
+      /*cacheable=*/true,
+      std::vector<IcebergDeleteFile>{},
+      infoColumns);
+
+  auto tableDataColumns = ROW({"c0"}, {BIGINT()});
+  auto outputType = ROW({"c0", "_row_id"}, {BIGINT(), BIGINT()});
+  auto plan = PlanBuilder()
+                  .startTableScan()
+                  .connectorId(kIcebergConnectorId)
+                  .outputType(outputType)
+                  .dataColumns(tableDataColumns)
+                  .endTableScan()
+                  .planNode();
+
+  // _row_id = first_row_id + _pos = 100 + 0, 100 + 1, 100 + 2.
+  std::vector<RowVectorPtr> expected;
+  expected.push_back(makeRowVector(
+      outputType->names(),
+      {
+          makeFlatVector<int64_t>({1, 2, 3}),
+          makeFlatVector<int64_t>({100, 101, 102}),
+      }));
+
+  AssertQueryBuilder(plan).splits({split}).assertResults(expected);
+}
+
+TEST_F(HiveIcebergTest, readRowIdColumnComputedWithDeletes) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  auto pathColumn = IcebergMetadataColumn::icebergDeleteFilePathColumn();
+  auto posColumn = IcebergMetadataColumn::icebergDeletePosColumn();
+
+  std::vector<RowVectorPtr> dataVectors;
+  dataVectors.push_back(makeRowVector({
+      makeFlatVector<int64_t>({10, 20, 30, 40, 50}),
+  }));
+  auto dataFilePath = TempFilePath::create();
+  writeToFile(dataFilePath->getPath(), dataVectors);
+
+  auto deleteFilePath = TempFilePath::create();
+  std::vector<RowVectorPtr> deleteVectors = {makeRowVector(
+      {pathColumn->name, posColumn->name},
+      {makeFlatVector<std::string>(
+           2, [&](auto) { return dataFilePath->getPath(); }),
+       makeFlatVector<int64_t>({1, 3})})};
+  writeToFile(deleteFilePath->getPath(), deleteVectors);
+
+  uint64_t upperBound = 3;
+  auto upperBoundLE = folly::Endian::little(upperBound);
+  auto encodedUpperBound = encoding::Base64::encode(
+      std::string_view(
+          reinterpret_cast<const char*>(&upperBoundLE), sizeof(upperBoundLE)));
+
+  IcebergDeleteFile deleteFile(
+      FileContent::kPositionalDeletes,
+      deleteFilePath->getPath(),
+      fileFormat_,
+      2,
+      getTestFileSize(deleteFilePath->getPath()),
+      {},
+      {},
+      {{posColumn->id, encodedUpperBound}});
+
+  auto file = filesystems::getFileSystem(dataFilePath->getPath(), nullptr)
+                  ->openFileForRead(dataFilePath->getPath());
+  std::unordered_map<std::string, std::string> infoColumns = {
+      {IcebergMetadataColumn::kFirstRowIdInfoColumn, "200"}};
+  auto split = std::make_shared<HiveIcebergSplit>(
+      kIcebergConnectorId,
+      dataFilePath->getPath(),
+      fileFormat_,
+      0,
+      file->size(),
+      std::unordered_map<std::string, std::optional<std::string>>{},
+      std::nullopt,
+      std::unordered_map<std::string, std::string>{},
+      nullptr,
+      /*cacheable=*/true,
+      std::vector<IcebergDeleteFile>{deleteFile},
+      infoColumns);
+
+  auto tableDataColumns = ROW({"c0"}, {BIGINT()});
+  auto outputType = ROW({"c0", "_row_id"}, {BIGINT(), BIGINT()});
+  auto plan = PlanBuilder()
+                  .startTableScan()
+                  .connectorId(kIcebergConnectorId)
+                  .outputType(outputType)
+                  .dataColumns(tableDataColumns)
+                  .endTableScan()
+                  .planNode();
+
+  // After deletes, surviving rows are at positions 0, 2, 4.
+  // _row_id = first_row_id + _pos = 200+0, 200+2, 200+4.
+  std::vector<RowVectorPtr> expected;
+  expected.push_back(makeRowVector(
+      outputType->names(),
+      {
+          makeFlatVector<int64_t>({10, 30, 50}),
+          makeFlatVector<int64_t>({200, 202, 204}),
+      }));
+
+  AssertQueryBuilder(plan).splits({split}).assertResults(expected);
+}
+
+// Verifies that _row_id is correctly assigned when a pushed-down filter
+// removes rows from the batch. The row-number column must track the
+// file-absolute position of each surviving row, not a sequential output index.
+TEST_F(HiveIcebergTest, readRowIdColumnWithFilter) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  // File rows at positions 0-4; no _row_id column present in file.
+  std::vector<RowVectorPtr> dataVectors;
+  dataVectors.push_back(makeRowVector({
+      makeFlatVector<int64_t>({10, 20, 30, 40, 50}),
+  }));
+  auto dataFilePath = TempFilePath::create();
+  writeToFile(dataFilePath->getPath(), dataVectors);
+
+  auto file = filesystems::getFileSystem(dataFilePath->getPath(), nullptr)
+                  ->openFileForRead(dataFilePath->getPath());
+  std::unordered_map<std::string, std::string> infoColumns = {
+      {IcebergMetadataColumn::kFirstRowIdInfoColumn, "100"}};
+  auto split = std::make_shared<HiveIcebergSplit>(
+      kIcebergConnectorId,
+      dataFilePath->getPath(),
+      fileFormat_,
+      0,
+      file->size(),
+      std::unordered_map<std::string, std::optional<std::string>>{},
+      std::nullopt,
+      std::unordered_map<std::string, std::string>{},
+      nullptr,
+      /*cacheable=*/true,
+      std::vector<IcebergDeleteFile>{},
+      infoColumns);
+
+  auto tableDataColumns = ROW({"c0"}, {BIGINT()});
+  auto outputType = ROW({"c0", "_row_id"}, {BIGINT(), BIGINT()});
+  // Filter keeps only rows where c0 > 20, i.e. file positions 2, 3, 4.
+  // _row_id must use file positions, not output indices, so the expected values
+  // are first_row_id + file_pos = 100+2, 100+3, 100+4 — not 100+0..2.
+  auto plan = PlanBuilder()
+                  .startTableScan()
+                  .connectorId(kIcebergConnectorId)
+                  .outputType(outputType)
+                  .dataColumns(tableDataColumns)
+                  .subfieldFilter("c0 > 20")
+                  .endTableScan()
+                  .planNode();
+
+  std::vector<RowVectorPtr> expected;
+  expected.push_back(makeRowVector(
+      outputType->names(),
+      {
+          makeFlatVector<int64_t>({30, 40, 50}),
+          makeFlatVector<int64_t>({102, 103, 104}),
+      }));
+
+  AssertQueryBuilder(plan).splits({split}).assertResults(expected);
+}
+
+TEST_F(HiveIcebergTest, readLastUpdatedSequenceNumberAllNulls) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  auto fileRowType =
+      ROW({"c0", "_last_updated_sequence_number"}, {BIGINT(), BIGINT()});
+
+  std::vector<RowVectorPtr> dataVectors;
+  dataVectors.push_back(makeRowVector(
+      fileRowType->names(),
+      {
+          makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
+          makeNullableFlatVector<int64_t>(
+              {std::nullopt,
+               std::nullopt,
+               std::nullopt,
+               std::nullopt,
+               std::nullopt}),
+      }));
+  auto dataFilePath = TempFilePath::create();
+  writeToFile(dataFilePath->getPath(), dataVectors);
+
+  auto file = filesystems::getFileSystem(dataFilePath->getPath(), nullptr)
+                  ->openFileForRead(dataFilePath->getPath());
+  std::unordered_map<std::string, std::string> infoColumns = {
+      {IcebergMetadataColumn::kDataSequenceNumberInfoColumn, "42"}};
+  auto split = std::make_shared<HiveIcebergSplit>(
+      kIcebergConnectorId,
+      dataFilePath->getPath(),
+      fileFormat_,
+      0,
+      file->size(),
+      std::unordered_map<std::string, std::optional<std::string>>{},
+      std::nullopt,
+      std::unordered_map<std::string, std::string>{},
+      nullptr,
+      /*cacheable=*/true,
+      std::vector<IcebergDeleteFile>{},
+      infoColumns);
+
+  // dataColumns is the table schema, which does NOT include
+  // _last_updated_sequence_number (hidden metadata column).
+  auto tableDataColumns = ROW({"c0"}, {BIGINT()});
+  auto outputType =
+      ROW({"c0", "_last_updated_sequence_number"}, {BIGINT(), BIGINT()});
+  auto plan = PlanBuilder()
+                  .startTableScan()
+                  .connectorId(kIcebergConnectorId)
+                  .outputType(outputType)
+                  .dataColumns(tableDataColumns)
+                  .endTableScan()
+                  .planNode();
+
+  // All null values should be replaced with 42 (the data sequence number).
+  std::vector<RowVectorPtr> expected;
+  expected.push_back(makeRowVector(
+      outputType->names(),
+      {
+          makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
+          makeFlatVector<int64_t>({42, 42, 42, 42, 42}),
+      }));
+
+  AssertQueryBuilder(plan).splits({split}).assertResults(expected);
+}
+
+TEST_F(HiveIcebergTest, readLastUpdatedSequenceNumberMixed) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  auto fileRowType =
+      ROW({"c0", "_last_updated_sequence_number"}, {BIGINT(), BIGINT()});
+
+  // Write data file with mixed null and non-null values.
+  std::vector<RowVectorPtr> dataVectors;
+  dataVectors.push_back(makeRowVector(
+      fileRowType->names(),
+      {
+          makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
+          makeNullableFlatVector<int64_t>(
+              {std::nullopt, 5, std::nullopt, 10, std::nullopt}),
+      }));
+  auto dataFilePath = TempFilePath::create();
+  writeToFile(dataFilePath->getPath(), dataVectors);
+
+  auto file = filesystems::getFileSystem(dataFilePath->getPath(), nullptr)
+                  ->openFileForRead(dataFilePath->getPath());
+  std::unordered_map<std::string, std::string> infoColumns = {
+      {IcebergMetadataColumn::kDataSequenceNumberInfoColumn, "42"}};
+  auto split = std::make_shared<HiveIcebergSplit>(
+      kIcebergConnectorId,
+      dataFilePath->getPath(),
+      fileFormat_,
+      0,
+      file->size(),
+      std::unordered_map<std::string, std::optional<std::string>>{},
+      std::nullopt,
+      std::unordered_map<std::string, std::string>{},
+      nullptr,
+      /*cacheable=*/true,
+      std::vector<IcebergDeleteFile>{},
+      infoColumns);
+
+  auto tableDataColumns = ROW({"c0"}, {BIGINT()});
+  auto outputType =
+      ROW({"c0", "_last_updated_sequence_number"}, {BIGINT(), BIGINT()});
+  auto plan = PlanBuilder()
+                  .startTableScan()
+                  .connectorId(kIcebergConnectorId)
+                  .outputType(outputType)
+                  .dataColumns(tableDataColumns)
+                  .endTableScan()
+                  .planNode();
+
+  // null values → 42, non-null values preserved.
+  std::vector<RowVectorPtr> expected;
+  expected.push_back(makeRowVector(
+      outputType->names(),
+      {
+          makeFlatVector<int64_t>({1, 2, 3, 4, 5}),
+          makeFlatVector<int64_t>({42, 5, 42, 10, 42}),
+      }));
+
+  AssertQueryBuilder(plan).splits({split}).assertResults(expected);
+}
+
+TEST_F(HiveIcebergTest, readLastUpdatedSequenceNumberInherited) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  // Write data file without _last_updated_sequence_number column.
+  std::vector<RowVectorPtr> dataVectors;
+  dataVectors.push_back(makeRowVector({
+      makeFlatVector<int64_t>({1, 2, 3}),
+  }));
+  auto dataFilePath = TempFilePath::create();
+  writeToFile(dataFilePath->getPath(), dataVectors);
+
+  auto file = filesystems::getFileSystem(dataFilePath->getPath(), nullptr)
+                  ->openFileForRead(dataFilePath->getPath());
+  std::unordered_map<std::string, std::string> infoColumns = {
+      {IcebergMetadataColumn::kDataSequenceNumberInfoColumn, "99"}};
+  auto split = std::make_shared<HiveIcebergSplit>(
+      kIcebergConnectorId,
+      dataFilePath->getPath(),
+      fileFormat_,
+      0,
+      file->size(),
+      std::unordered_map<std::string, std::optional<std::string>>{},
+      std::nullopt,
+      std::unordered_map<std::string, std::string>{},
+      nullptr,
+      /*cacheable=*/true,
+      std::vector<IcebergDeleteFile>{},
+      infoColumns);
+
+  auto tableDataColumns = ROW({"c0"}, {BIGINT()});
+  auto outputType =
+      ROW({"c0", "_last_updated_sequence_number"}, {BIGINT(), BIGINT()});
+  auto plan = PlanBuilder()
+                  .startTableScan()
+                  .connectorId(kIcebergConnectorId)
+                  .outputType(outputType)
+                  .dataColumns(tableDataColumns)
+                  .endTableScan()
+                  .planNode();
+
+  // _last_updated_sequence_number should be inherited from data sequence
+  // number.
+  std::vector<RowVectorPtr> expected;
+  expected.push_back(makeRowVector(
+      outputType->names(),
+      {
+          makeFlatVector<int64_t>({1, 2, 3}),
+          makeFlatVector<int64_t>({99, 99, 99}),
+      }));
+
+  AssertQueryBuilder(plan).splits({split}).assertResults(expected);
+}
+
+TEST_F(HiveIcebergTest, readLastUpdatedSequenceNumberMixedWithDeletes) {
+  folly::SingletonVault::singleton()->registrationComplete();
+
+  auto pathColumn = IcebergMetadataColumn::icebergDeleteFilePathColumn();
+  auto posColumn = IcebergMetadataColumn::icebergDeletePosColumn();
+
+  auto fileRowType =
+      ROW({"c0", "_last_updated_sequence_number"}, {BIGINT(), BIGINT()});
+
+  // Write data file with 5 rows, mixed null and non-null seq numbers.
+  std::vector<RowVectorPtr> dataVectors;
+  dataVectors.push_back(makeRowVector(
+      fileRowType->names(),
+      {
+          makeFlatVector<int64_t>({10, 20, 30, 40, 50}),
+          makeNullableFlatVector<int64_t>(
+              {std::nullopt, 5, std::nullopt, 10, std::nullopt}),
+      }));
+  auto dataFilePath = TempFilePath::create();
+  writeToFile(dataFilePath->getPath(), dataVectors);
+
+  // Delete rows at positions 0 and 2, leaving positions 1 (seq=5), 3
+  // (seq=10), and 4 (seq=null) as survivors. This tests that non-null values
+  // are preserved after deletes, and null values are replaced by the inherited
+  // data sequence number.
+  auto deleteFilePath = TempFilePath::create();
+  std::vector<RowVectorPtr> deleteVectors = {makeRowVector(
+      {pathColumn->name, posColumn->name},
+      {makeFlatVector<std::string>(
+           2, [&](auto) { return dataFilePath->getPath(); }),
+       makeFlatVector<int64_t>({0, 2})})};
+  writeToFile(deleteFilePath->getPath(), deleteVectors);
+
+  uint64_t upperBound = 2;
+  auto upperBoundLE = folly::Endian::little(upperBound);
+  auto encodedUpperBound = encoding::Base64::encode(
+      std::string_view(
+          reinterpret_cast<const char*>(&upperBoundLE), sizeof(upperBoundLE)));
+
+  IcebergDeleteFile deleteFile(
+      FileContent::kPositionalDeletes,
+      deleteFilePath->getPath(),
+      fileFormat_,
+      2,
+      getTestFileSize(deleteFilePath->getPath()),
+      {},
+      {},
+      {{posColumn->id, encodedUpperBound}});
+
+  auto file = filesystems::getFileSystem(dataFilePath->getPath(), nullptr)
+                  ->openFileForRead(dataFilePath->getPath());
+  std::unordered_map<std::string, std::string> infoColumns = {
+      {IcebergMetadataColumn::kDataSequenceNumberInfoColumn, "42"}};
+  auto split = std::make_shared<HiveIcebergSplit>(
+      kIcebergConnectorId,
+      dataFilePath->getPath(),
+      fileFormat_,
+      0,
+      file->size(),
+      std::unordered_map<std::string, std::optional<std::string>>{},
+      std::nullopt,
+      std::unordered_map<std::string, std::string>{},
+      nullptr,
+      /*cacheable=*/true,
+      std::vector<IcebergDeleteFile>{deleteFile},
+      infoColumns);
+
+  auto tableDataColumns = ROW({"c0"}, {BIGINT()});
+  auto outputType =
+      ROW({"c0", "_last_updated_sequence_number"}, {BIGINT(), BIGINT()});
+  auto plan = PlanBuilder()
+                  .startTableScan()
+                  .connectorId(kIcebergConnectorId)
+                  .outputType(outputType)
+                  .dataColumns(tableDataColumns)
+                  .endTableScan()
+                  .planNode();
+
+  // After deletes (positions 0,2 removed), surviving rows are at positions
+  // 1, 3, 4. Their _last_updated_sequence_number values:
+  //   pos 1: 5    → 5  (non-null value preserved)
+  //   pos 3: 10   → 10 (non-null value preserved)
+  //   pos 4: null → 42 (replaced with data_sequence_number)
+  std::vector<RowVectorPtr> expected;
+  expected.push_back(makeRowVector(
+      outputType->names(),
+      {
+          makeFlatVector<int64_t>({20, 40, 50}),
+          makeFlatVector<int64_t>({5, 10, 42}),
+      }));
+
+  AssertQueryBuilder(plan).splits({split}).assertResults(expected);
 }
 
 #ifdef VELOX_ENABLE_PARQUET
