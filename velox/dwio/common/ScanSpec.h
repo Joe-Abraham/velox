@@ -472,10 +472,14 @@ class ScanSpec {
     return disableStatsBasedFilterReorder_;
   }
 
+  /// Hides ('value' false) or restores ('value' true) the filter on this
+  /// subtree from filter()/hasFilter(), without discarding it. Public so a
+  /// connector can defer testing a filter until a dependent value is
+  /// computed, then re-test it manually -- there's no higher-level hook.
+  void enableFilterInSubTree(bool value);
+
  private:
   void reorder();
-
-  void enableFilterInSubTree(bool value);
 
   bool compareTimeToDropValue(
       const std::shared_ptr<ScanSpec>& x,

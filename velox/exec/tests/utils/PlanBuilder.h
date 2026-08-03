@@ -358,6 +358,11 @@ class PlanBuilder {
     /// Build the plan node TableScanNode.
     core::PlanNodePtr build(core::PlanNodeId id);
 
+    // Row type to parse filter expressions against: 'dataColumns_' (or
+    // 'outputType_' if unset), extended with any 'filterColumnHandles_' not
+    // already present, so a filter can reference an unprojected column.
+    RowTypePtr parseTypeWithFilterColumns() const;
+
     PlanBuilder& planBuilder_;
     std::string tableName_{"hive_table"};
     std::string connectorId_{kHiveDefaultConnectorId};

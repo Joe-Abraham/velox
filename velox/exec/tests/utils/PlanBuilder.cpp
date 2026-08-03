@@ -244,6 +244,22 @@ std::pair<common::Subfield, std::unique_ptr<common::Filter>> toSubfieldFilter(
 }
 } // namespace
 
+RowTypePtr PlanBuilder::TableScanBuilder::parseTypeWithFilterColumns() const {
+  RowTypePtr parseType = dataColumns_ ? dataColumns_ : outputType_;
+  if (!filterColumnHandles_.empty()) {
+    auto names = parseType->names();
+    auto types = parseType->children();
+    for (auto& handle : filterColumnHandles_) {
+      if (!parseType->containsChild(handle->name())) {
+        names.push_back(handle->name());
+        types.push_back(handle->hiveType());
+      }
+    }
+    parseType = ROW(std::move(names), std::move(types));
+  }
+  return parseType;
+}
+
 PlanBuilder::TableScanBuilder& PlanBuilder::TableScanBuilder::subfieldFilters(
     std::vector<std::string> subfieldFilters) {
   VELOX_CHECK(subfieldFiltersMap_.empty());
@@ -255,7 +271,7 @@ PlanBuilder::TableScanBuilder& PlanBuilder::TableScanBuilder::subfieldFilters(
   // Parse subfield filters
   auto queryCtx = core::QueryCtx::create();
   exec::SimpleExpressionEvaluator evaluator(queryCtx.get(), planBuilder_.pool_);
-  const RowTypePtr& parseType = dataColumns_ ? dataColumns_ : outputType_;
+  const RowTypePtr parseType = parseTypeWithFilterColumns();
 
   for (const auto& filter : subfieldFilters) {
     auto untypedExpr = parse::DuckSqlExpressionsParser(planBuilder_.options_)
@@ -345,18 +361,7 @@ core::PlanNodePtr PlanBuilder::TableScanBuilder::build(core::PlanNodeId id) {
     }
   }
 
-  RowTypePtr parseType = dataColumns_ ? dataColumns_ : outputType_;
-  if (!filterColumnHandles_.empty()) {
-    auto names = parseType->names();
-    auto types = parseType->children();
-    for (auto& handle : filterColumnHandles_) {
-      if (!parseType->containsChild(handle->name())) {
-        names.push_back(handle->name());
-        types.push_back(handle->hiveType());
-      }
-    }
-    parseType = ROW(std::move(names), std::move(types));
-  }
+  const RowTypePtr parseType = parseTypeWithFilterColumns();
 
   core::TypedExprPtr filterNodeExpr;
 

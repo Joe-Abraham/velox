@@ -930,6 +930,96 @@ TEST_F(IcebergReadTest, rowLineage) {
   });
 }
 
+// Regresses filtering on an unprojected row-lineage column, including with
+// a downstream DISTINCT (aggregation, no aggregates) that needs its own
+// output type. _row_id/_last_updated_sequence_number are synthesized, never
+// stored in the file, so an unprojected filter on either used to throw
+// "Field not found" while resolving against dataColumns().
+TEST_F(IcebergReadTest, rowLineageFilterOnUnprojectedColumn) {
+  std::vector<RowVectorPtr> inputVectors = {makeRowVector(
+      {"c0"}, {makeFlatVector<int64_t>({1, 1, 2, 2, 3, 3, 4, 4})})};
+  auto dataFilePath = TempFilePath::create();
+  writeToFile(dataFilePath->getPath(), inputVectors);
+
+  std::unordered_map<std::string, std::string> infoColumns;
+  infoColumns[IcebergMetadataColumn::kFirstRowIdInfoColumn] = "100";
+  infoColumns[IcebergMetadataColumn::kDataSequenceNumberInfoColumn] = "7";
+
+  const auto tableDataColumns = ROW({"c0"}, {BIGINT()});
+  const auto outputType = ROW({"c0"}, {BIGINT()});
+
+  // WHERE _row_id = 102 (position 2, firstRowId 100) matches only c0 = 2.
+  // _row_id is unprojected; 'withDistinct' adds a DISTINCT on top to
+  // regress the downstream operator's output type.
+  auto runQuery = [&](bool withDistinct) {
+    auto rowIdFilterHandle = std::make_shared<HiveColumnHandle>(
+        IcebergMetadataColumn::kRowIdColumnName,
+        HiveColumnHandle::ColumnType::kRegular,
+        BIGINT(),
+        BIGINT());
+    auto tableScanBuilder = exec::test::PlanBuilder()
+                                .startTableScan(test::kIcebergConnectorId)
+                                .outputType(outputType)
+                                .dataColumns(tableDataColumns)
+                                .filterColumnHandles({rowIdFilterHandle})
+                                .subfieldFilter("_row_id = 102")
+                                .endTableScan();
+    auto plan = withDistinct
+        ? tableScanBuilder.singleAggregation({"c0"}, {}).planNode()
+        : tableScanBuilder.planNode();
+    exec::test::AssertQueryBuilder(plan)
+        .splits({makeIcebergSplitWithInfoColumns(
+            dataFilePath->getPath(), infoColumns, {})})
+        .assertResults({makeRowVector({"c0"}, {makeFlatVector<int64_t>({2})})});
+  };
+  runQuery(/*withDistinct=*/false);
+  runQuery(/*withDistinct=*/true);
+}
+
+// Same bug class as rowLineageFilterOnUnprojectedColumn, for a
+// schema-evolution default-value column instead of row lineage: an
+// unprojected filter on a column absent from the file threw "Field not
+// found", and once fixed, still ignored the default value because
+// adaptColumns() only looked up defaults via projected columnHandles_, not
+// filter-only ones.
+TEST_F(IcebergReadTest, filterOnUnprojectedDefaultValueColumn) {
+  auto dataVectors = makeSingleBigintData({1, 2, 3, 4, 5});
+  auto dataFilePath = TempFilePath::create();
+  writeToFile(dataFilePath->getPath(), dataVectors);
+
+  const auto tableDataColumns = ROW({"c0"}, {BIGINT()});
+  const auto outputType = ROW({"c0"}, {BIGINT()});
+
+  // WHERE country = 'IN' (default value, absent from the file) matches all
+  // 5 rows. 'country' is unprojected; 'withDistinct' adds a DISTINCT on top.
+  auto runQuery = [&](const std::string& filter,
+                      const std::vector<RowVectorPtr>& expected,
+                      bool withDistinct) {
+    auto countryFilterHandle = makeIcebergHandle("country", VARCHAR(), 2, "IN");
+    auto tableScanBuilder = exec::test::PlanBuilder()
+                                .startTableScan(test::kIcebergConnectorId)
+                                .outputType(outputType)
+                                .dataColumns(tableDataColumns)
+                                .filterColumnHandles({countryFilterHandle})
+                                .subfieldFilter(filter)
+                                .endTableScan();
+    auto plan = withDistinct
+        ? tableScanBuilder.singleAggregation({"c0"}, {}).planNode()
+        : tableScanBuilder.planNode();
+    exec::test::AssertQueryBuilder(plan)
+        .splits(makeIcebergSplits(dataFilePath->getPath()))
+        .assertResults(expected);
+  };
+
+  auto allRows =
+      makeRowVector({"c0"}, {makeFlatVector<int64_t>({1, 2, 3, 4, 5})});
+  runQuery("country = 'IN'", {allRows}, /*withDistinct=*/false);
+  runQuery("country = 'IN'", {allRows}, /*withDistinct=*/true);
+  // Doesn't match the default: expects no rows, not all rows (which a fix
+  // that ignored the filter or the default would each wrongly produce).
+  runQuery("country = 'US'", {}, /*withDistinct=*/false);
+}
+
 // Tests Iceberg MERGE INTO row-id synthesis: the projection of the synthetic
 // $target_table_row_id ROW column produced at read time from the split's
 // infoColumns ($path, $spec_id, partition_data) plus the file row positions.

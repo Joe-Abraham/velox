@@ -73,6 +73,49 @@ void fillNullsWithInt64(
   }
 }
 
+// Compacts 'output' to rows where 'keep(i)' is true; re-applies a filter
+// deferred until a column's real value is known (see
+// detachDeferredFilter()). No-op if every row is kept.
+//
+// Leaves 'rowsScanned' at the pre-filter count when all rows are removed:
+// the caller treats a 0 return as end-of-split, which would cut the scan
+// short.
+template <typename F>
+void compactToKeptRows(
+    facebook::velox::VectorPtr& output,
+    uint64_t& rowsScanned,
+    facebook::velox::memory::MemoryPool* pool,
+    F keep) {
+  using namespace facebook::velox;
+  auto* rowOutput = output->as<RowVector>();
+  VELOX_DCHECK_NOT_NULL(rowOutput, "Expected RowVector output from table scan");
+  const auto numRows = rowOutput->size();
+
+  std::vector<BaseVector::CopyRange> ranges;
+  ranges.reserve(numRows);
+  vector_size_t numKept = 0;
+  for (vector_size_t i = 0; i < numRows; ++i) {
+    if (keep(i)) {
+      ranges.push_back({i, numKept++, 1});
+    }
+  }
+
+  if (numKept == numRows) {
+    return;
+  }
+
+  if (numKept == 0) {
+    output = BaseVector::create(rowOutput->type(), 0, pool);
+    return;
+  }
+
+  auto newOutput = BaseVector::create(rowOutput->type(), numKept, pool);
+  newOutput->copyRanges(rowOutput, ranges);
+  newOutput->resize(numKept);
+  output = newOutput;
+  rowsScanned = numKept;
+}
+
 } // namespace
 
 namespace facebook::velox::connector::hive::iceberg {
@@ -96,6 +139,60 @@ bool shouldSkipBySequenceNumber(
   }
   return isEqualityDelete ? (deleteFileSeqNum <= dataSeqNum)
                           : (deleteFileSeqNum < dataSeqNum);
+}
+
+// Hides 'spec's filter from the base reader and returns a clone, to be
+// re-tested once the deferred column's real value is known. Uses
+// enableFilterInSubTree() rather than setFilter(nullptr) because 'spec' is
+// shared across splits; visibility is always restored first, then re-hidden
+// only if 'shouldDefer' is true for this split.
+std::unique_ptr<common::Filter> detachDeferredFilter(
+    common::ScanSpec* spec,
+    bool shouldDefer) {
+  if (spec == nullptr) {
+    return nullptr;
+  }
+  spec->enableFilterInSubTree(true);
+  if (!shouldDefer || spec->filter() == nullptr) {
+    return nullptr;
+  }
+  auto filter = spec->filter()->clone();
+  spec->enableFilterInSubTree(false);
+  return filter;
+}
+
+// Promotes an unprojected filter column (e.g. `WHERE _row_id = 5` without
+// selecting it) to a projected output column, appended to
+// 'readerOutputType', so next() has a channel to defer its filter against.
+// FileDataSource drops the extra trailing column, as it already does for
+// configureEqualityDeleteColumns(). No-op if already projected or unfiltered.
+//
+// 'scanSpec' is shared across splits, so projectOut is always reset first
+// and only re-applied if 'shouldPromote' is true for this split.
+void promoteFilterOnlyColumn(
+    common::ScanSpec* scanSpec,
+    RowTypePtr& readerOutputType,
+    const char* columnName,
+    const TypePtr& columnType,
+    bool shouldPromote) {
+  if (readerOutputType->containsChild(columnName)) {
+    return;
+  }
+  auto* fieldSpec = scanSpec->childByName(columnName);
+  if (fieldSpec == nullptr) {
+    return;
+  }
+  fieldSpec->setProjectOut(false);
+  if (!shouldPromote || fieldSpec->filter() == nullptr) {
+    return;
+  }
+  fieldSpec->setProjectOut(true);
+  fieldSpec->setChannel(static_cast<column_index_t>(readerOutputType->size()));
+  auto names = readerOutputType->names();
+  auto types = readerOutputType->children();
+  names.emplace_back(columnName);
+  types.push_back(columnType);
+  readerOutputType = ROW(std::move(names), std::move(types));
 }
 
 } // namespace
@@ -304,25 +401,58 @@ void IcebergSplitReader::prepareSplit(
         *dataSequenceNumber_, 0, "Data sequence number must be non-negative");
   }
 
+  // Must run before getAdaptedRowType() so adaptColumns() sees the promoted
+  // columns. Runs unconditionally: 'scanSpec_' is shared across splits, so
+  // a split without row lineage must still undo an earlier split's
+  // promotion.
+  promoteFilterOnlyColumn(
+      scanSpec_.get(),
+      readerOutputType_,
+      IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName,
+      BIGINT(),
+      dataSequenceNumber_.has_value() && firstRowId_.has_value());
+  promoteFilterOnlyColumn(
+      scanSpec_.get(),
+      readerOutputType_,
+      IcebergMetadataColumn::kRowIdColumnName,
+      BIGINT(),
+      firstRowId_.has_value());
+
   // getAdaptedRowType() calls adaptColumns(), which may set
   // _last_updated_sequence_number to a constant. Must run after
   // dataSequenceNumber_ and firstRowId_ are initialized.
   auto rowType = getAdaptedRowType();
 
+  // detachDeferredFilter() runs unconditionally: 'scanSpec_' is shared
+  // across splits, so even a split that doesn't defer must restore filter
+  // visibility an earlier split may have hidden.
   lastUpdatedSeqNumOutputIndex_ = std::nullopt;
-  if (dataSequenceNumber_.has_value() && firstRowId_.has_value()) {
+  lastUpdatedSeqNumFilter_ = nullptr;
+  {
     auto* seqNumSpec = scanSpec_->childByName(
         IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName);
-    if (seqNumSpec && !seqNumSpec->isConstant()) {
+    const bool shouldDeferSeqNum = dataSequenceNumber_.has_value() &&
+        firstRowId_.has_value() && seqNumSpec != nullptr &&
+        !seqNumSpec->isConstant();
+    if (shouldDeferSeqNum) {
       lastUpdatedSeqNumOutputIndex_ = readerOutputType_->getChildIdxIfExists(
           IcebergMetadataColumn::kLastUpdatedSequenceNumberColumnName);
     }
+    lastUpdatedSeqNumFilter_ =
+        detachDeferredFilter(seqNumSpec, shouldDeferSeqNum);
   }
 
   rowIdOutputIndex_ = std::nullopt;
-  if (firstRowId_.has_value()) {
-    rowIdOutputIndex_ = readerOutputType_->getChildIdxIfExists(
-        IcebergMetadataColumn::kRowIdColumnName);
+  rowIdFilter_ = nullptr;
+  {
+    if (firstRowId_.has_value()) {
+      rowIdOutputIndex_ = readerOutputType_->getChildIdxIfExists(
+          IcebergMetadataColumn::kRowIdColumnName);
+    }
+    auto* rowIdSpec =
+        scanSpec_->childByName(IcebergMetadataColumn::kRowIdColumnName);
+    rowIdFilter_ =
+        detachDeferredFilter(rowIdSpec, rowIdOutputIndex_.has_value());
   }
 
   // Iceberg MERGE INTO row-id synthesis: detect projection of
@@ -805,6 +935,35 @@ uint64_t IcebergSplitReader::next(uint64_t size, VectorPtr& output) {
           rowOutput->size(),
           std::move(children));
     }
+  }
+
+  // Re-apply the filters detached in prepareSplit(), now that the real
+  // values are computed above.
+  if (rowsScanned > 0 && rowIdFilter_ != nullptr) {
+    const auto rowIdChild = BaseVector::loadedVectorShared(
+        output->as<RowVector>()->childAt(*rowIdOutputIndex_));
+    const DecodedVector decodedRowId(*rowIdChild);
+    compactToKeptRows(output, rowsScanned, pool, [&](vector_size_t i) {
+      VELOX_DCHECK(
+          !decodedRowId.isNullAt(i),
+          "_row_id must be non-null once first_row_id is present");
+      return common::applyFilter(
+          *rowIdFilter_, decodedRowId.valueAt<int64_t>(i));
+    });
+  }
+
+  if (rowsScanned > 0 && lastUpdatedSeqNumFilter_ != nullptr) {
+    const auto seqNumChild = BaseVector::loadedVectorShared(
+        output->as<RowVector>()->childAt(*lastUpdatedSeqNumOutputIndex_));
+    const DecodedVector decodedSeqNum(*seqNumChild);
+    compactToKeptRows(output, rowsScanned, pool, [&](vector_size_t i) {
+      VELOX_DCHECK(
+          !decodedSeqNum.isNullAt(i),
+          "_last_updated_sequence_number must be non-null once "
+          "first_row_id is present");
+      return common::applyFilter(
+          *lastUpdatedSeqNumFilter_, decodedSeqNum.valueAt<int64_t>(i));
+    });
   }
 
   // Apply equality deletes after reading base data. Unlike positional deletes

@@ -23,6 +23,7 @@
 #include "velox/connectors/hive/iceberg/DeletionVectorReader.h"
 #include "velox/connectors/hive/iceberg/EqualityDeleteFileReader.h"
 #include "velox/connectors/hive/iceberg/PositionalDeleteFileReader.h"
+#include "velox/type/Filter.h"
 
 namespace facebook::velox::connector::hive::iceberg {
 
@@ -174,6 +175,9 @@ class IcebergSplitReader : public FileSplitReader {
   BufferPtr deleteBitmap_;
   // Output column index of _last_updated_sequence_number, if projected.
   std::optional<column_index_t> lastUpdatedSeqNumOutputIndex_;
+  // Deferred filter on _last_updated_sequence_number; re-applied in next()
+  // once nulls are backfilled from dataSequenceNumber_.
+  std::unique_ptr<common::Filter> lastUpdatedSeqNumFilter_;
   // Data sequence number from the split's manifest entry, used to populate
   // _last_updated_sequence_number for rows whose stored value is null.
   std::optional<int64_t> dataSequenceNumber_;
@@ -183,6 +187,9 @@ class IcebergSplitReader : public FileSplitReader {
   std::optional<int64_t> firstRowId_;
   // Output column index of _row_id, if projected.
   std::optional<column_index_t> rowIdOutputIndex_;
+  // Deferred filter on _row_id; re-applied in next() once first_row_id +
+  // row position is computed.
+  std::unique_ptr<common::Filter> rowIdFilter_;
   // Output column index of $target_table_row_id, if projected. Populated in
   // prepareSplit() when the reader output includes the synthetic MERGE INTO
   // row-id ROW column. next() consumes this index to overwrite the placeholder
