@@ -57,14 +57,13 @@ struct TransportKind {
 /// Generic representation of InsertTable
 struct InsertTableHandle {
  public:
+  /// @param notNullColumns Target columns that must not contain nulls, empty
+  /// if unconstrained. Throws a user error if it contains duplicates.
   InsertTableHandle(
       const std::string& connectorId,
       const connector::ConnectorInsertTableHandlePtr&
           connectorInsertTableHandle,
-      std::vector<std::string> notNullColumnNames = {})
-      : connectorId_(connectorId),
-        connectorInsertTableHandle_(connectorInsertTableHandle),
-        notNullColumnNames_(std::move(notNullColumnNames)) {}
+      std::vector<std::string> notNullColumns);
 
   const std::string& connectorId() const {
     return connectorId_;
@@ -75,9 +74,10 @@ struct InsertTableHandle {
     return connectorInsertTableHandle_;
   }
 
-  /// Target columns that must not contain nulls; empty if unconstrained.
-  const std::vector<std::string>& notNullColumnNames() const {
-    return notNullColumnNames_;
+  /// Target columns that must not contain nulls. Empty if unconstrained.
+  /// Names are unique.
+  const std::vector<std::string>& notNullColumns() const {
+    return notNullColumns_;
   }
 
  private:
@@ -87,8 +87,7 @@ struct InsertTableHandle {
   // Write request to a DataSink of that connector type
   const connector::ConnectorInsertTableHandlePtr connectorInsertTableHandle_;
 
-  // Target columns that must not contain nulls; empty if unconstrained.
-  const std::vector<std::string> notNullColumnNames_;
+  const std::vector<std::string> notNullColumns_;
 };
 
 class SortOrder {
@@ -1569,9 +1568,9 @@ class TableWriteNode : public PlanNode {
   ///   - grouping keys must be a subset of 'columns' (partition columns).
   ///   - grouping keys must not contain duplicates.
   /// @param insertTableHandle Connector-specific handle identifying the
-  /// target table and write operation. If its notNullColumnNames() is set,
-  /// those 'columnNames' entries must not contain nulls; the operator throws
-  /// a user error otherwise.
+  /// target table and write operation. Its notNullColumns() must be a subset
+  /// of 'columnNames'; the operator throws a user error if any of these
+  /// columns contains a null.
   /// @param hasPartitioningScheme Whether a partitioning scheme is configured
   /// for shuffles. Controls which query config determines the number of
   /// writer operator instances: 'task_partitioned_writer_count' if true,
