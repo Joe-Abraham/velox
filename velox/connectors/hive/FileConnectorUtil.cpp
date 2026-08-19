@@ -262,22 +262,37 @@ bool testFilters(
       // By design, the partition key columns for Iceberg tables are included in
       // the data files to facilitate partition transform and partition
       // evolution, so we need to test both cases.
-      if (!rowType->containsChild(name) || iter != partitionKeys.end()) {
+      //
+      // A constant decides the column even when the file carries it: the
+      // constant is what the scan returns, and 'fileTypeWithId' leaves out its
+      // subtree, so there are no statistics to read anyway.
+      if (child->isConstant() || !rowType->containsChild(name) ||
+          iter != partitionKeys.end()) {
         if (iter != partitionKeys.end() && iter->second.has_value()) {
           const auto handlesIter = partitionKeysHandle.find(name);
           VELOX_CHECK(handlesIter != partitionKeysHandle.end());
 
-          // This is a non-null partition key
-          return applyPartitionFilter(
-              handlesIter->second->dataType(),
-              iter->second.value(),
-              handlesIter->second->isPartitionDateValueDaysSinceEpoch(),
-              child->filter(),
-              asLocalTime);
+          // Keep going when a non-null partition key passes: a later column may
+          // still exclude the split.
+          if (!applyPartitionFilter(
+                  handlesIter->second->dataType(),
+                  iter->second.value(),
+                  handlesIter->second->isPartitionDateValueDaysSinceEpoch(),
+                  child->filter(),
+                  asLocalTime)) {
+            VLOG(1) << "Skipping " << filePath
+                    << " because the partition value failed the filter for "
+                       "column "
+                    << name;
+            return false;
+          }
+          continue;
         }
-        // Column is missing from the file. If it has a constant value (e.g.,
-        // an initial-default from schema evolution), test the filter against
-        // it. Otherwise treat the column as NULL.
+        // The value does not come from the file body. Test the filter against
+        // the constant if there is one (e.g. an initial-default from schema
+        // evolution), otherwise treat the column as NULL. This is the only
+        // place a non-null constant is filtered on: testFilterOnConstant()
+        // accepts one whatever the filter says, leaving the decision here.
         bool filterMatchedConstant = false;
         if (child->isConstant()) {
           auto constantVec = child->constantValue();

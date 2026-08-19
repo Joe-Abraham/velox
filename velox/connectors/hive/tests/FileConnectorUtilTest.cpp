@@ -516,6 +516,137 @@ TEST_F(FileConnectorUtilTest, testFiltersPartitionKeyFails) {
           /*asLocalTime=*/false));
 }
 
+// A constant on the scan spec decides the filter even when the data file
+// carries the column: the constant is what the scan returns. Building the
+// reader with the scan spec also leaves the constant's subtree out of
+// 'typeWithId()', so reading its statistics would dereference null.
+TEST_F(FileConnectorUtilTest, testFiltersConstantOverridingFileColumn) {
+  auto batch =
+      makeRowVector({"c0"}, {makeFlatVector<int64_t>(100, folly::identity)});
+  auto filePath = writeDataFile(batch);
+
+  auto makeReaderWithScanSpec =
+      [&](const std::shared_ptr<common::ScanSpec>& scanSpec) {
+        dwio::common::ReaderOptions readerOpts(pool_.get());
+        readerOpts.setFileFormat(dwio::common::FileFormat::DWRF);
+        readerOpts.setScanSpec(scanSpec);
+        return dwrf::DwrfReader::create(
+            std::make_unique<dwio::common::BufferedInput>(
+                std::make_shared<LocalReadFile>(filePath),
+                readerOpts.memoryPool()),
+            readerOpts);
+      };
+
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  // The file holds 0 through 99, so a filter tested against the statistics
+  // would keep the split for both constants below.
+  scanSpec->addField("c0", 0)->setConstantValue<int64_t>(
+      1'000, BIGINT(), pool_.get());
+  auto reader = makeReaderWithScanSpec(scanSpec);
+
+  auto* childSpec = scanSpec->childByName("c0");
+  childSpec->setFilter(std::make_shared<common::BigintRange>(0, 99, false));
+  EXPECT_FALSE(
+      hive::testFilters(
+          scanSpec.get(),
+          reader.get(),
+          filePath,
+          /*partitionKeys=*/{},
+          /*partitionKeysHandle=*/{},
+          /*asLocalTime=*/false));
+
+  childSpec->setFilter(
+      std::make_shared<common::BigintRange>(1'000, 1'000, false));
+  EXPECT_TRUE(
+      hive::testFilters(
+          scanSpec.get(),
+          reader.get(),
+          filePath,
+          /*partitionKeys=*/{},
+          /*partitionKeysHandle=*/{},
+          /*asLocalTime=*/false));
+
+  // A null constant decides the column the same way, from the filter's
+  // testNull() alone. The file holds no null, so a filter tested against the
+  // statistics would answer the other way for both filters below.
+  auto nullScanSpec = std::make_shared<common::ScanSpec>("<root>");
+  auto* nullChildSpec = nullScanSpec->addField("c0", 0);
+  nullChildSpec->setConstantValue(
+      BaseVector::createNullConstant(BIGINT(), 1, pool_.get()));
+  auto nullConstantReader = makeReaderWithScanSpec(nullScanSpec);
+
+  nullChildSpec->setFilter(std::make_shared<common::IsNotNull>());
+  EXPECT_FALSE(
+      hive::testFilters(
+          nullScanSpec.get(),
+          nullConstantReader.get(),
+          filePath,
+          /*partitionKeys=*/{},
+          /*partitionKeysHandle=*/{},
+          /*asLocalTime=*/false));
+
+  nullChildSpec->setFilter(std::make_shared<common::IsNull>());
+  EXPECT_TRUE(
+      hive::testFilters(
+          nullScanSpec.get(),
+          nullConstantReader.get(),
+          filePath,
+          /*partitionKeys=*/{},
+          /*partitionKeysHandle=*/{},
+          /*asLocalTime=*/false));
+}
+
+// Every partition key carrying a filter has to be tested, not just the first
+// one found. Nothing downstream re-checks them: a partition value reaches the
+// reader as a non-null constant, which testFilterOnConstant() accepts whatever
+// the filter says.
+TEST_F(FileConnectorUtilTest, testFiltersSecondPartitionKeyFails) {
+  auto batch =
+      makeRowVector({"c0"}, {makeFlatVector<int64_t>(100, folly::identity)});
+  auto filePath = writeDataFile(batch);
+  auto reader = makeReader(filePath);
+
+  auto scanSpec = std::make_shared<common::ScanSpec>("<root>");
+  scanSpec->addField("c0", 0);
+  // 'ds' comes first in the scan spec and its filter passes, so a search that
+  // stops at the first partition key never reaches 'hour'.
+  scanSpec->addField("ds", 1)->setFilter(
+      std::make_unique<common::BytesValues>(
+          std::vector<std::string>{"2024-01-01"}, false));
+  scanSpec->addField("hour", 2)->setFilter(
+      std::make_unique<common::BigintRange>(0, 11, false));
+
+  const std::unordered_map<std::string, std::optional<std::string>>
+      partitionKeys = {
+          {"ds", "2024-01-01"},
+          {"hour", "23"},
+      };
+  const std::unordered_map<std::string, hive::FileColumnHandlePtr>
+      partitionKeysHandle = {
+          {"ds",
+           std::make_shared<hive::HiveColumnHandle>(
+               "ds",
+               hive::HiveColumnHandle::ColumnType::kPartitionKey,
+               VARCHAR(),
+               VARCHAR())},
+          {"hour",
+           std::make_shared<hive::HiveColumnHandle>(
+               "hour",
+               hive::HiveColumnHandle::ColumnType::kPartitionKey,
+               BIGINT(),
+               BIGINT())},
+      };
+
+  EXPECT_FALSE(
+      hive::testFilters(
+          scanSpec.get(),
+          reader.get(),
+          filePath,
+          partitionKeys,
+          partitionKeysHandle,
+          /*asLocalTime=*/false));
+}
+
 TEST_F(FileConnectorUtilTest, testFiltersNullPartitionKeyRejectsNotNull) {
   auto rowType = ROW({"c0"}, {BIGINT()});
   auto batch =
