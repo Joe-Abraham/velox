@@ -69,6 +69,13 @@ class ScanSpec {
     filter_ = std::move(filter);
   }
 
+  /// Enables or disables filtering by 'this' and its descendants in the
+  /// readers, leaving the filters in place. Use for a column whose final values
+  /// the reader does not produce, such as a delta updated or synthesized one:
+  /// filtering on the value the reader sees drops the wrong rows. The caller
+  /// applies the filter once the values are final, with applyFilter().
+  void setFilterEnabled(bool value);
+
   void setMaxArrayElementsCount(vector_size_t count) {
     maxArrayElementsCount_ = count;
   }
@@ -181,12 +188,15 @@ class ScanSpec {
     return children_;
   }
 
-  /// Returns 'children in a stable order. May be used for parallel
+  /// Returns 'children' in a stable order. May be used for parallel
   /// construction and read-ahead of reader trees while the main user
   /// of 'this' is running. 'children_' may be reordered while running
   /// but the tree being constructed must see a single, unchanging
-  /// order.
-  const std::vector<ScanSpec*>& stableChildren();
+  /// order. A child added later goes to the end of a fresh snapshot, so
+  /// the trees already built keep the order they saw. The snapshot is
+  /// returned by value: a reader tree may be built from it on another
+  /// thread while a split being prepared on this one adds a child.
+  std::shared_ptr<const std::vector<ScanSpec*>> stableChildren();
 
   /// Returns a read sequence number. This can b used for tagging
   /// lazy vectors with a generation number so that we can check that
@@ -348,25 +358,20 @@ class ScanSpec {
 
   void setDeltaUpdate(dwio::common::DeltaColumnUpdater* update) {
     deltaUpdate_ = update;
-    enableFilterInSubTree(update == nullptr);
+    setFilterEnabled(update == nullptr);
   }
 
-  void resetDeltaUpdates() {
-    for (auto& child : children_) {
-      // Only top level columns can have delta updates.
-      if (child->deltaUpdate_) {
-        child->setDeltaUpdate(nullptr);
-      }
-    }
-  }
+  /// Clears the delta update of every top level column, re-enabling filtering
+  /// on the ones that had one.
+  void resetDeltaUpdates();
 
   /// Apply filter to the first `size' rows of input `vector' and set the passed
   /// bits in `result'.  `size' is usually the size of top most RowVector, since
   /// the child could be larger in some suboptimal/corrupted cases and we do not
   /// want to crash the process for it.
   ///
-  /// This method is used by non-selective reader and delta update, so it
-  /// ignores the filterDisabled_ state.
+  /// Used by the non-selective reader, by delta update, and by readers that
+  /// synthesize values after the read, so it ignores the filterDisabled_ state.
   void applyFilter(
       const BaseVector& vector,
       vector_size_t size,
@@ -475,7 +480,14 @@ class ScanSpec {
  private:
   void reorder();
 
-  void enableFilterInSubTree(bool value);
+  // Enables or disables filtering by this spec and its descendants. Returns
+  // true if any of them changed, letting the caller skip a needless reset.
+  bool enableFilterInSubTree(bool value);
+
+  // Resets the memoized hasFilter() of every spec in the tree 'this' belongs
+  // to. It is memoized all the way up, so a reset that stops at 'this' leaves
+  // an ancestor reporting the stale answer.
+  void resetCachedValuesInTree();
 
   bool compareTimeToDropValue(
       const std::shared_ptr<ScanSpec>& x,
@@ -528,10 +540,16 @@ class ScanSpec {
 
   std::vector<std::shared_ptr<ScanSpec>> children_;
 
+  // Containing spec, nullptr for the root. Stable across reorder(), which
+  // permutes 'children_' without moving the specs themselves.
+  ScanSpec* parent_{nullptr};
+
   // Read-only copy of children, not subject to reordering. Used when
   // asynchronously constructing reader trees for read-ahead, while
-  // 'children_' is reorderable by a running scan.
-  std::vector<ScanSpec*> stableChildren_;
+  // 'children_' is reorderable by a running scan. Immutable once
+  // published; adding a child replaces it with a new snapshot under
+  // 'mutex_' so that readers already iterating one are unaffected.
+  std::shared_ptr<const std::vector<ScanSpec*>> stableChildren_;
 
   folly::F14FastMap<std::string, ScanSpec*> childByFieldName_;
 

@@ -17,10 +17,13 @@
 #include <glog/logging.h>
 #include <gtest/gtest.h>
 #include "velox/common/base/VeloxException.h"
+#include "velox/common/base/tests/GTestUtils.h"
+#include "velox/dwio/common/ScanSpec.h"
 #include "velox/dwio/common/TypeUtils.h"
 #include "velox/dwio/common/TypeWithId.h"
 #include "velox/type/fbhive/HiveTypeParser.h"
 #include "velox/type/fbhive/HiveTypeSerializer.h"
+#include "velox/vector/BaseVector.h"
 
 using namespace facebook::velox;
 using namespace facebook::velox::dwio;
@@ -191,6 +194,44 @@ TEST(TestType, selectedType) {
   EXPECT_EQ(1, cutType->childAt(0)->maxId());
   EXPECT_EQ(11, cutType->childAt(1)->id());
   EXPECT_EQ(11, cutType->childAt(1)->maxId());
+}
+
+// create(type, spec) leaves out the children a ScanSpec does not read from the
+// file, so type() still names a child that is null. The readers rely on that
+// shape, so pin it.
+TEST(TestType, prunedByScanSpec) {
+  memory::MemoryManager::testingSetInstance(memory::MemoryManager::Options{});
+  auto pool = memory::memoryManager()->addLeafPool();
+
+  auto rowType = ROW(
+      {"read", "pruned", "constant", "absent"},
+      {BIGINT(), ROW({"x", "y"}, {BIGINT(), BIGINT()}), BIGINT(), BIGINT()});
+
+  // Fully qualified: 'common' alone is ambiguous with dwio::common here.
+  facebook::velox::common::ScanSpec scanSpec("<root>");
+  scanSpec.addField("read", 0);
+  // Projected, so the value is still returned, but it comes from the spec.
+  scanSpec.addField("constant", 1)
+      ->setConstantValue(
+          BaseVector::createNullConstant(BIGINT(), 1, pool.get()));
+  // 'pruned' and 'absent' get no spec child at all.
+
+  auto pruned = TypeWithId::create(rowType, scanSpec);
+
+  // Every child is still named, and only 'read' is actually there.
+  EXPECT_EQ(*pruned->type(), *rowType);
+  ASSERT_EQ(pruned->size(), rowType->size());
+  EXPECT_NE(pruned->childByName("read"), nullptr);
+  EXPECT_EQ(pruned->childByName("pruned"), nullptr);
+  EXPECT_EQ(pruned->childByName("constant"), nullptr);
+  EXPECT_EQ(pruned->childByName("absent"), nullptr);
+  VELOX_ASSERT_THROW(pruned->childByName("nonexistent"), "Field not found");
+
+  // Ids number as if nothing were left out, including the two nodes inside the
+  // skipped 'pruned' subtree, so they remain usable as file node ids.
+  auto full = TypeWithId::create(rowType);
+  EXPECT_EQ(pruned->childByName("read")->id(), full->childByName("read")->id());
+  EXPECT_EQ(pruned->maxId(), full->maxId());
 }
 
 TEST(TestType, buildTypeFromString) {

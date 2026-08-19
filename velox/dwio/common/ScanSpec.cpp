@@ -43,7 +43,25 @@ ScanSpec* ScanSpec::getOrCreateChild(const std::string& name) {
   }
   this->children_.push_back(std::make_unique<ScanSpec>(name));
   auto* child = this->children_.back().get();
+  child->parent_ = this;
   this->childByFieldName_[child->fieldName()] = child;
+  {
+    // 'stableChildren_' is built on first use and the reader trees are built
+    // from it. A snapshot that has been handed out is never mutated, because a
+    // reader tree may be under construction from it on another thread; instead
+    // 'child' is appended to a copy, which leaves the order the trees already
+    // built saw untouched and makes 'child' visible to the next one. A split
+    // reader creates a child for a column only this split needs, such as an
+    // Iceberg equality delete column outside the query's projection, and every
+    // split of a scan shares the ScanSpec.
+    std::lock_guard<std::mutex> l(mutex_);
+    if (stableChildren_ != nullptr) {
+      auto stableChildren =
+          std::make_shared<std::vector<ScanSpec*>>(*stableChildren_);
+      stableChildren->push_back(child);
+      stableChildren_ = std::move(stableChildren);
+    }
+  }
   return child;
 }
 
@@ -132,20 +150,56 @@ void ScanSpec::reorder() {
       });
 }
 
-void ScanSpec::enableFilterInSubTree(bool value) {
+bool ScanSpec::enableFilterInSubTree(bool value) {
+  bool changed = filterDisabled_ == value;
   filterDisabled_ = !value;
   for (auto& child : children_) {
-    child->enableFilterInSubTree(value);
+    // Not '||': every descendant has to be visited.
+    changed |= child->enableFilterInSubTree(value);
+  }
+  return changed;
+}
+
+void ScanSpec::resetCachedValuesInTree() {
+  auto* root = this;
+  while (root->parent_ != nullptr) {
+    root = root->parent_;
+  }
+  root->resetCachedValues(false);
+}
+
+void ScanSpec::setFilterEnabled(bool value) {
+  // Resetting walks the whole tree, so skip it when nothing changed.
+  if (enableFilterInSubTree(value)) {
+    resetCachedValuesInTree();
   }
 }
 
-const std::vector<ScanSpec*>& ScanSpec::stableChildren() {
-  std::lock_guard<std::mutex> l(mutex_);
-  if (stableChildren_.empty()) {
-    stableChildren_.reserve(children_.size());
-    for (auto& child : children_) {
-      stableChildren_.push_back(child.get());
+void ScanSpec::resetDeltaUpdates() {
+  // Not setDeltaUpdate(): that resets the memoized hasFilter() of the whole
+  // tree per column, while one reset at the end covers all of them.
+  bool changed = false;
+  for (auto& child : children_) {
+    // Only top level columns can have delta updates.
+    if (child->deltaUpdate_ != nullptr) {
+      child->deltaUpdate_ = nullptr;
+      changed |= child->enableFilterInSubTree(true);
     }
+  }
+  if (changed) {
+    resetCachedValuesInTree();
+  }
+}
+
+std::shared_ptr<const std::vector<ScanSpec*>> ScanSpec::stableChildren() {
+  std::lock_guard<std::mutex> l(mutex_);
+  if (stableChildren_ == nullptr) {
+    auto stableChildren = std::make_shared<std::vector<ScanSpec*>>();
+    stableChildren->reserve(children_.size());
+    for (auto& child : children_) {
+      stableChildren->push_back(child.get());
+    }
+    stableChildren_ = std::move(stableChildren);
   }
   return stableChildren_;
 }
@@ -206,11 +260,11 @@ void ScanSpec::moveAdaptationFrom(ScanSpec& other) {
       continue;
     }
     auto* otherChild = it->second;
-    if (!child->isConstant() && !otherChild->isConstant()) {
-      // If other child is constant, a possible filter on a
-      // constant will have been evaluated at split start time. If
-      // 'child' is constant there is no adaptation that can be
-      // received.
+    // A filter on a constant is evaluated at split start, so a constant on
+    // either side leaves no adaptation to receive. Not so when filtering on
+    // 'child' is disabled: nothing evaluated its filter.
+    if ((!child->isConstant() && !otherChild->isConstant()) ||
+        child->filterDisabled_) {
       child->filter_ = std::move(otherChild->filter_);
       child->selectivity_ = otherChild->selectivity_;
     }
