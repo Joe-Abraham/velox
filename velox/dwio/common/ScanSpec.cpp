@@ -36,6 +36,12 @@ std::string_view ScanSpec::columnTypeString(ScanSpec::ColumnType columnType) {
   }
 }
 
+ScanSpec::~ScanSpec() {
+  for (auto& child : children_) {
+    child->parent_ = nullptr;
+  }
+}
+
 ScanSpec* ScanSpec::getOrCreateChild(const std::string& name) {
   // Serializes concurrent adds. Readers of 'children_' and 'childByFieldName_'
   // do not take it; see the declaration.

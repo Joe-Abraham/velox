@@ -56,6 +56,8 @@ class ScanSpec {
 
   explicit ScanSpec(const std::string& name) : fieldName_(name) {}
 
+  ~ScanSpec();
+
   /// Filter to apply. If 'this' corresponds to a struct/list/map, this
   /// can only be isNull or isNotNull, other filtering is given by
   /// 'children'.
@@ -543,8 +545,9 @@ class ScanSpec {
 
   std::vector<std::shared_ptr<ScanSpec>> children_;
 
-  // Containing spec, nullptr for the root. reorder() permutes 'children_'
-  // without moving the specs, so this stays valid.
+  // Containing spec, nullptr for the root and for a child that outlives it.
+  // reorder() permutes 'children_' without moving the specs, so this stays
+  // valid.
   ScanSpec* parent_{nullptr};
 
   // Children in the order they were added, never reordered. Not handed out;

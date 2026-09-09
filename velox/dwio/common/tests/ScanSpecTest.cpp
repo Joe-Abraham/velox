@@ -322,6 +322,26 @@ TEST_F(ScanSpecTest, resetDeltaUpdatesOnlyClearsUpdatedColumns) {
   EXPECT_TRUE(scanSpec.hasFilter());
 }
 
+// A snapshot keeps its children alive after the spec they came from is gone.
+// Mutating one of them then has to stop at the child, with no containing spec
+// left to walk into.
+TEST_F(ScanSpecTest, retainedChildOutlivesSpec) {
+  auto scanSpec = std::make_unique<ScanSpec>("<root>");
+  auto* added = scanSpec->addField("c0", 0);
+  added->setFilter(std::make_shared<BigintRange>(10, 20, false));
+  const auto children = scanSpec->stableChildren();
+  ASSERT_THAT(*children, ElementsAre(Pointer(added)));
+
+  const auto& child = (*children)[0];
+  scanSpec.reset();
+
+  NoopDeltaColumnUpdater updater;
+  child->setDeltaUpdate(&updater);
+  EXPECT_FALSE(child->hasFilter());
+  child->setDeltaUpdate(nullptr);
+  EXPECT_TRUE(child->hasFilter());
+}
+
 std::shared_ptr<ScanSpec> makeAdaptationSpec() {
   auto spec = std::make_shared<ScanSpec>("<root>");
   spec->addField("c0", 0);
