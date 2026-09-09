@@ -36,12 +36,6 @@ std::string_view ScanSpec::columnTypeString(ScanSpec::ColumnType columnType) {
   }
 }
 
-ScanSpec::~ScanSpec() {
-  for (auto& child : children_) {
-    child->parent_ = nullptr;
-  }
-}
-
 ScanSpec* ScanSpec::getOrCreateChild(const std::string& name) {
   // Serializes concurrent adds. Readers of 'children_' and 'childByFieldName_'
   // do not take it; see the declaration.
@@ -52,7 +46,6 @@ ScanSpec* ScanSpec::getOrCreateChild(const std::string& name) {
   }
   this->children_.push_back(std::make_shared<ScanSpec>(name));
   const auto& child = this->children_.back();
-  child->parent_ = this;
   this->childByFieldName_[child->fieldName()] = child.get();
   stableOrder_.push_back(child);
   stableChildren_.reset();
@@ -149,27 +142,6 @@ void ScanSpec::enableFilterInSubTree(bool value) {
   }
 }
 
-void ScanSpec::resetHasFilterUpToRoot() {
-  for (auto* spec = this; spec != nullptr; spec = spec->parent_) {
-    spec->hasFilter_.reset();
-  }
-}
-
-void ScanSpec::setDeltaUpdate(dwio::common::DeltaColumnUpdater* update) {
-  deltaUpdate_ = update;
-  enableFilterInSubTree(update == nullptr);
-  resetHasFilterUpToRoot();
-}
-
-void ScanSpec::resetDeltaUpdates() {
-  for (auto& child : children_) {
-    // Only top level columns can have delta updates.
-    if (child->deltaUpdate_ != nullptr) {
-      child->setDeltaUpdate(nullptr);
-    }
-  }
-}
-
 ScanSpec::StableChildren ScanSpec::stableChildren() {
   std::lock_guard<std::mutex> l(mutex_);
   if (stableChildren_ == nullptr) {
@@ -236,18 +208,12 @@ void ScanSpec::moveAdaptationFrom(ScanSpec& other) {
       continue;
     }
     auto* otherChild = it->second;
-    // A filter on a constant is evaluated at split start, so a constant on
-    // either side leaves nothing to receive. Filtering disabled means nothing
-    // evaluated it.
-    if ((!child->isConstant() && !otherChild->isConstant()) ||
-        child->filterDisabled_) {
-      // A null source filter is no adaptation; it would clear 'child's own.
-      if (otherChild->filter_ != nullptr) {
-        child->filter_ = std::move(otherChild->filter_);
-        // The split was prepared before the adaptation arrived, so what
-        // 'child' and its ancestors memoized is stale.
-        child->resetHasFilterUpToRoot();
-      }
+    if (!child->isConstant() && !otherChild->isConstant()) {
+      // If other child is constant, a possible filter on a
+      // constant will have been evaluated at split start time. If
+      // 'child' is constant there is no adaptation that can be
+      // received.
+      child->filter_ = std::move(otherChild->filter_);
       child->selectivity_ = otherChild->selectivity_;
     }
   }

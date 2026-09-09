@@ -56,8 +56,6 @@ class ScanSpec {
 
   explicit ScanSpec(const std::string& name) : fieldName_(name) {}
 
-  ~ScanSpec();
-
   /// Filter to apply. If 'this' corresponds to a struct/list/map, this
   /// can only be isNull or isNotNull, other filtering is given by
   /// 'children'.
@@ -183,8 +181,7 @@ class ScanSpec {
     return children_;
   }
 
-  /// Snapshot of the children in a stable order. Keeps both the vector and
-  /// the specs in it alive, so it may outlive the spec it came from.
+  /// Snapshot of the children in a stable order.
   using StableChildren =
       std::shared_ptr<const std::vector<std::shared_ptr<ScanSpec>>>;
 
@@ -359,21 +356,27 @@ class ScanSpec {
     return deltaUpdate_;
   }
 
-  /// Sets the updater that produces the final values of this column, taking
-  /// filtering on it away from the readers while one is set.
-  void setDeltaUpdate(dwio::common::DeltaColumnUpdater* update);
+  void setDeltaUpdate(dwio::common::DeltaColumnUpdater* update) {
+    deltaUpdate_ = update;
+    enableFilterInSubTree(update == nullptr);
+  }
 
-  /// Clears the delta update of every top level column, re-enabling filtering
-  /// on the ones that had one.
-  void resetDeltaUpdates();
+  void resetDeltaUpdates() {
+    for (auto& child : children_) {
+      // Only top level columns can have delta updates.
+      if (child->deltaUpdate_) {
+        child->setDeltaUpdate(nullptr);
+      }
+    }
+  }
 
   /// Apply filter to the first `size' rows of input `vector' and set the passed
   /// bits in `result'.  `size' is usually the size of top most RowVector, since
   /// the child could be larger in some suboptimal/corrupted cases and we do not
   /// want to crash the process for it.
   ///
-  /// Used by the non-selective reader, by delta update, and by readers that
-  /// synthesize values after the read, so it ignores the filterDisabled_ state.
+  /// This method is used by non-selective reader and delta update, so it
+  /// ignores the filterDisabled_ state.
   void applyFilter(
       const BaseVector& vector,
       vector_size_t size,
@@ -482,15 +485,7 @@ class ScanSpec {
  private:
   void reorder();
 
-  // Enables or disables filtering by this spec and its descendants.
   void enableFilterInSubTree(bool value);
-
-  // Resets the memoized hasFilter() of this spec and of every ancestor. Only
-  // those can be stale after filtering is turned on or off here, or after a
-  // filter moves in: an ancestor memoizes what its children report, while a
-  // descendant memoizes nothing while filtering is disabled, because
-  // hasFilter() answers from 'filterDisabled_' before it reads the memo.
-  void resetHasFilterUpToRoot();
 
   bool compareTimeToDropValue(
       const std::shared_ptr<ScanSpec>& x,
@@ -544,11 +539,6 @@ class ScanSpec {
   SelectivityInfo selectivity_;
 
   std::vector<std::shared_ptr<ScanSpec>> children_;
-
-  // Containing spec, nullptr for the root and for a child that outlives it.
-  // reorder() permutes 'children_' without moving the specs, so this stays
-  // valid.
-  ScanSpec* parent_{nullptr};
 
   // Children in the order they were added, never reordered. Not handed out;
   // 'stableChildren_' publishes a copy.
